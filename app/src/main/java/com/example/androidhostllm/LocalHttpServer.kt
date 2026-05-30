@@ -15,11 +15,21 @@ class LocalHttpServer(
     private val serverMode: String,
 ) : NanoHTTPD(bindHost, port) {
 
+    private val modelId = "local-litert-lm"
+
     override fun serve(session: IHTTPSession): Response {
         if (session.method == Method.OPTIONS) return corsPreflightResponse()
+
+        val path = normalizePath(session.uri.orEmpty())
         return when {
-            session.method == Method.GET && session.uri == "/health" -> healthResponse()
-            session.method == Method.POST && session.uri == "/v1/chat/completions" -> chatCompletionResponse(session)
+            session.method == Method.GET && path == "/" -> routesResponse(session)
+            session.method == Method.GET && path == "/routes" -> routesResponse(session)
+            session.method == Method.GET && path == "/v1" -> routesResponse(session)
+            session.method == Method.GET && path == "/health" -> healthResponse()
+            session.method == Method.GET && (path == "/v1/models" || path == "/models") -> modelsResponse()
+            session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse()
+            session.method == Method.POST && path == "/v1/chat/completions" -> chatCompletionResponse(session)
+            session.method == Method.GET && path == "/v1/chat/completions" -> methodNotAllowedResponse()
             else -> jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
         }
     }
@@ -32,6 +42,33 @@ class LocalHttpServer(
         stop()
     }
 
+    private fun normalizePath(path: String): String {
+        if (path.isBlank()) return "/"
+        val withoutQuery = path.substringBefore('?')
+        val withLeadingSlash = if (withoutQuery.startsWith('/')) withoutQuery else "/$withoutQuery"
+        return if (withLeadingSlash.length > 1) withLeadingSlash.trimEnd('/') else "/"
+    }
+
+    private fun routesResponse(session: IHTTPSession): Response {
+        return jsonResponse(Response.Status.OK, routeHelpJson(session))
+    }
+
+    private fun routeHelpJson(session: IHTTPSession): JSONObject {
+        val host = session.headers["host"] ?: session.headers["Host"] ?: "$bindHost:${listeningPort}"
+        return JSONObject()
+            .put("status", "ok")
+            .put("message", "LiteRT-LM local server is running")
+            .put("baseUrl", "http://$host/v1")
+            .put(
+                "routes",
+                JSONObject()
+                    .put("health", "GET /health")
+                    .put("models", "GET /v1/models")
+                    .put("chat", "POST /v1/chat/completions")
+            )
+            .put("note", "Use POST for /v1/chat/completions. Browser GET requests do not run inference.")
+    }
+
     private fun healthResponse(): Response {
         return jsonResponse(
             Response.Status.OK,
@@ -39,6 +76,44 @@ class LocalHttpServer(
                 .put("status", "ok")
                 .put("modelLoaded", liteRtLmManager.isLoaded())
                 .put("serverMode", serverMode)
+        )
+    }
+
+    private fun modelsResponse(): Response {
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("object", "list")
+                .put(
+                    "data",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("id", modelId)
+                            .put("object", "model")
+                            .put("created", 0)
+                            .put("owned_by", "local-device")
+                    )
+                )
+        )
+    }
+
+    private fun debugRoutesResponse(): Response {
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("routesEnabled", true)
+                .put("cors", true)
+                .put("privateNetworkAccess", true)
+                .put("modelsEndpoint", true)
+                .put("streamingCompat", true)
+        )
+    }
+
+    private fun methodNotAllowedResponse(): Response {
+        return jsonResponse(
+            Response.Status.METHOD_NOT_ALLOWED,
+            JSONObject().put("error", "Method not allowed. Use POST /v1/chat/completions.")
         )
     }
 
@@ -62,8 +137,8 @@ class LocalHttpServer(
             )
         }
 
-        val prompt = try {
-            extractPrompt(JSONObject(body))
+        val requestJson = try {
+            JSONObject(body)
         } catch (error: JSONException) {
             return jsonResponse(
                 Response.Status.BAD_REQUEST,
@@ -71,6 +146,7 @@ class LocalHttpServer(
             )
         }
 
+        val prompt = extractPrompt(requestJson)
         if (prompt.isNullOrBlank()) {
             return jsonResponse(
                 Response.Status.BAD_REQUEST,
@@ -78,25 +154,18 @@ class LocalHttpServer(
             )
         }
 
+        val stream = requestJson.optBoolean("stream", false)
+        val nowSeconds = System.currentTimeMillis() / 1000
+        val completionId = "chatcmpl-local-$nowSeconds"
+
         val result = runBlocking { liteRtLmManager.generate(prompt) }
         return result.fold(
             onSuccess = { output ->
-                jsonResponse(
-                    Response.Status.OK,
-                    JSONObject()
-                        .put("response", output)
-                        .put(
-                            "choices",
-                            JSONArray().put(
-                                JSONObject().put(
-                                    "message",
-                                    JSONObject()
-                                        .put("role", "assistant")
-                                        .put("content", output)
-                                )
-                            )
-                        )
-                )
+                if (stream) {
+                    streamingChatCompletionResponse(completionId, nowSeconds, output)
+                } else {
+                    jsonResponse(Response.Status.OK, chatCompletionJson(completionId, nowSeconds, output))
+                }
             },
             onFailure = { error ->
                 jsonResponse(
@@ -105,6 +174,78 @@ class LocalHttpServer(
                 )
             }
         )
+    }
+
+    private fun chatCompletionJson(completionId: String, created: Long, output: String): JSONObject {
+        return JSONObject()
+            .put("id", completionId)
+            .put("object", "chat.completion")
+            .put("created", created)
+            .put("model", modelId)
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject()
+                        .put("index", 0)
+                        .put(
+                            "message",
+                            JSONObject()
+                                .put("role", "assistant")
+                                .put("content", output)
+                        )
+                        .put("finish_reason", "stop")
+                )
+            )
+            .put("response", output)
+    }
+
+    private fun streamingChatCompletionResponse(completionId: String, created: Long, output: String): Response {
+        val contentChunk = JSONObject()
+            .put("id", completionId)
+            .put("object", "chat.completion.chunk")
+            .put("created", created)
+            .put("model", modelId)
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject()
+                        .put("index", 0)
+                        .put(
+                            "delta",
+                            JSONObject()
+                                .put("role", "assistant")
+                                .put("content", output)
+                        )
+                        .put("finish_reason", JSONObject.NULL)
+                )
+            )
+
+        val stopChunk = JSONObject()
+            .put("id", completionId)
+            .put("object", "chat.completion.chunk")
+            .put("created", created)
+            .put("model", modelId)
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject()
+                        .put("index", 0)
+                        .put("delta", JSONObject())
+                        .put("finish_reason", "stop")
+                )
+            )
+
+        val body = buildString {
+            append("data: ").append(contentChunk.toString()).append("\n\n")
+            append("data: ").append(stopChunk.toString()).append("\n\n")
+            append("data: [DONE]\n\n")
+        }
+
+        return newFixedLengthResponse(Response.Status.OK, "text/event-stream", body).apply {
+            addCorsHeaders()
+            addHeader("Cache-Control", "no-cache")
+            addHeader("Connection", "keep-alive")
+        }
     }
 
     private fun isAuthorized(session: IHTTPSession): Boolean {
@@ -138,19 +279,20 @@ class LocalHttpServer(
     }
 
     private fun extractPrompt(json: JSONObject): String? {
-        json.optString("prompt").takeIf { it.isNotBlank() }?.let { return it }
-        val messages = json.optJSONArray("messages") ?: return null
-        for (index in messages.length() - 1 downTo 0) {
-            val message = messages.optJSONObject(index) ?: continue
-            if (message.optString("role") == "user") {
-                return message.optString("content").takeIf { it.isNotBlank() }
+        val messages = json.optJSONArray("messages")
+        if (messages != null) {
+            for (index in messages.length() - 1 downTo 0) {
+                val message = messages.optJSONObject(index) ?: continue
+                if (message.optString("role") == "user") {
+                    return message.optString("content").takeIf { it.isNotBlank() }
+                }
             }
         }
-        return null
+        return json.optString("prompt").takeIf { it.isNotBlank() }
     }
 
     private fun corsPreflightResponse(): Response {
-        return newFixedLengthResponse(Response.Status.NO_CONTENT, "application/json", "").apply {
+        return newFixedLengthResponse(Response.Status.NO_CONTENT, "text/plain", "").apply {
             addCorsHeaders()
         }
     }
@@ -163,8 +305,9 @@ class LocalHttpServer(
 
     private fun Response.addCorsHeaders() {
         addHeader("Access-Control-Allow-Origin", "*")
-        addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
         addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        addHeader("Content-Type", "application/json")
+        addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+        addHeader("Access-Control-Max-Age", "86400")
+        addHeader("Access-Control-Allow-Private-Network", "true")
     }
 }
