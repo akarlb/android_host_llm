@@ -2,7 +2,7 @@
 
 This repository contains a minimal Android/Kotlin app that loads a local Google LiteRT-LM `.litertlm` model and serves a small JSON HTTP API from the phone. The MVP is designed for practical on-device testing: install the APK, download a compatible LiteRT Community model inside the app, load it, then expose the model over either localhost or the phone's Wi-Fi/LAN address.
 
-It is intentionally not a polished chat product. There is no streaming, no accounts, no billing, no Firebase/cloud service, and only one active model is managed at a time.
+It is intentionally not a polished chat product. It has no accounts, no billing, no Firebase/cloud service, and only one active model is managed at a time.
 
 ## Build the APK from GitHub Actions
 
@@ -205,7 +205,7 @@ curl -i -X POST "http://<PHONE_IP>:8080/v1/chat/completions" \
   -d '{"model":"local-litert-lm","messages":[{"role":"user","content":"Say hello."}],"stream":false}'
 ```
 
-Streaming compatibility:
+Streaming chat:
 
 ```sh
 curl -N -X POST "http://<PHONE_IP>:8080/v1/chat/completions" \
@@ -238,10 +238,39 @@ If you started in localhost-only mode, call `http://127.0.0.1:8080/v1/chat/compl
 
 ## Known limitations
 
-- Streaming responses are compatibility SSE responses: the app generates the full response first, then sends OpenAI-style SSE chunks ending with `[DONE]`.
+- Streaming uses LiteRT-LM `sendMessageAsync()` and OpenAI-style SSE chunks ending with `[DONE]`; the client and network stack must keep the HTTP connection open to display chunks incrementally.
 - One active model/conversation at a time.
 - Model download is large and can take a long time.
 - Device battery management may kill the app unless the foreground service/notification is active or the app stays open.
 - LAN access depends on same-network connectivity, router/client isolation, and firewall behavior.
 - GPU support depends on the device, drivers, and model. The app tries GPU first and falls back to CPU.
 - This is an MVP control screen, not a polished product UI.
+
+## Performance and streaming
+
+This build enables LiteRT-LM Multi-Token Prediction / speculative decoding before GPU engine initialization when the pinned LiteRT-LM SDK exposes the experimental API. The app does not enable speculative decoding for CPU fallback. The UI reports the current backend and whether MTP/speculative decoding is enabled.
+
+For `stream=true`, the server now uses LiteRT-LM `sendMessageAsync()` and returns OpenAI-compatible Server-Sent Events incrementally as model chunks arrive. Streaming does not change the final non-streaming JSON shape; requests without `stream` or with `stream:false` still return `object: chat.completion`, `choices[0].message.content`, and the simple `response` field.
+
+Test real streaming from another device on the same Wi-Fi/LAN:
+
+```sh
+curl -N -X POST "http://<PHONE_IP>:8080/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local-litert-lm","messages":[{"role":"user","content":"Write three short sentences."}],"stream":true}'
+```
+
+Check performance metrics:
+
+```sh
+curl http://<PHONE_IP>:8080/debug/perf
+```
+
+The `/debug/perf` response includes backend status, model-loaded status, speculative-decoding status, last load duration, first-chunk latency, generation duration, output character count, approximate characters per second, and whether the last request used streaming. It does not expose prompt text, Hugging Face tokens, or API keys.
+
+Performance notes:
+
+- Streaming improves perceived speed because clients can display partial output as soon as chunks arrive instead of waiting for the full answer.
+- MTP/speculative decoding may improve raw decode speed on GPU-capable devices.
+- Phone thermal throttling can reduce speed during long sessions, especially while plugged in or under sustained GPU load.
+- Shorter responses are faster because the model generates fewer tokens. The app includes a **Response length** selector: **Short** adds a concise-answer instruction, **Medium** asks for a clear direct answer, and **Long** sends no concision instruction.

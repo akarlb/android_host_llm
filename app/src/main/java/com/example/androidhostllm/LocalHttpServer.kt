@@ -2,6 +2,9 @@ package com.example.androidhostllm
 
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.runBlocking
+import java.io.OutputStreamWriter
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -28,6 +31,7 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/health" -> healthResponse()
             session.method == Method.GET && (path == "/v1/models" || path == "/models") -> modelsResponse()
             session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse()
+            session.method == Method.GET && path == "/debug/perf" -> performanceResponse()
             session.method == Method.POST && path == "/v1/chat/completions" -> chatCompletionResponse(session)
             session.method == Method.GET && path == "/v1/chat/completions" -> methodNotAllowedResponse()
             else -> jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
@@ -65,6 +69,7 @@ class LocalHttpServer(
                     .put("health", "GET /health")
                     .put("models", "GET /v1/models")
                     .put("chat", "POST /v1/chat/completions")
+                    .put("performance", "GET /debug/perf")
             )
             .put("note", "Use POST for /v1/chat/completions. Browser GET requests do not run inference.")
     }
@@ -107,7 +112,13 @@ class LocalHttpServer(
                 .put("privateNetworkAccess", true)
                 .put("modelsEndpoint", true)
                 .put("streamingCompat", true)
+                .put("streamingIncremental", true)
+                .put("performanceEndpoint", "GET /debug/perf")
         )
+    }
+
+    private fun performanceResponse(): Response {
+        return jsonResponse(Response.Status.OK, liteRtLmManager.performanceSnapshot())
     }
 
     private fun methodNotAllowedResponse(): Response {
@@ -153,19 +164,20 @@ class LocalHttpServer(
                 JSONObject().put("error", "Missing prompt or user message content")
             )
         }
+        val promptedWithStyle = liteRtLmManager.applyResponseLengthHint(prompt)
 
         val stream = requestJson.optBoolean("stream", false)
         val nowSeconds = System.currentTimeMillis() / 1000
         val completionId = "chatcmpl-local-$nowSeconds"
 
-        val result = runBlocking { liteRtLmManager.generate(prompt) }
+        if (stream) {
+            return streamingChatCompletionResponse(completionId, nowSeconds, promptedWithStyle)
+        }
+
+        val result = runBlocking { liteRtLmManager.generate(promptedWithStyle) }
         return result.fold(
             onSuccess = { output ->
-                if (stream) {
-                    streamingChatCompletionResponse(completionId, nowSeconds, output)
-                } else {
-                    jsonResponse(Response.Status.OK, chatCompletionJson(completionId, nowSeconds, output))
-                }
+                jsonResponse(Response.Status.OK, chatCompletionJson(completionId, nowSeconds, output))
             },
             onFailure = { error ->
                 jsonResponse(
@@ -199,53 +211,84 @@ class LocalHttpServer(
             .put("response", output)
     }
 
-    private fun streamingChatCompletionResponse(completionId: String, created: Long, output: String): Response {
-        val contentChunk = JSONObject()
-            .put("id", completionId)
-            .put("object", "chat.completion.chunk")
-            .put("created", created)
-            .put("model", modelId)
-            .put(
-                "choices",
-                JSONArray().put(
-                    JSONObject()
-                        .put("index", 0)
-                        .put(
-                            "delta",
-                            JSONObject()
-                                .put("role", "assistant")
-                                .put("content", output)
-                        )
-                        .put("finish_reason", JSONObject.NULL)
-                )
-            )
+    private fun streamingChatCompletionResponse(completionId: String, created: Long, prompt: String): Response {
+        val input = PipedInputStream(STREAM_PIPE_BUFFER_BYTES)
+        val output = PipedOutputStream(input)
 
-        val stopChunk = JSONObject()
-            .put("id", completionId)
-            .put("object", "chat.completion.chunk")
-            .put("created", created)
-            .put("model", modelId)
-            .put(
-                "choices",
-                JSONArray().put(
-                    JSONObject()
-                        .put("index", 0)
-                        .put("delta", JSONObject())
-                        .put("finish_reason", "stop")
-                )
-            )
+        Thread {
+            OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
+                fun writeEvent(payload: String) {
+                    writer.write("data: ")
+                    writer.write(payload)
+                    writer.write("\n\n")
+                    writer.flush()
+                }
 
-        val body = buildString {
-            append("data: ").append(contentChunk.toString()).append("\n\n")
-            append("data: ").append(stopChunk.toString()).append("\n\n")
-            append("data: [DONE]\n\n")
+                try {
+                    writeEvent(chatCompletionChunkJson(completionId, created, role = "assistant").toString())
+                    val result = runBlocking {
+                        liteRtLmManager.generateStreaming(prompt) { chunk ->
+                            writeEvent(chatCompletionChunkJson(completionId, created, content = chunk).toString())
+                        }
+                    }
+                    result.fold(
+                        onSuccess = {
+                            writeEvent(chatCompletionChunkJson(completionId, created, finishReason = "stop").toString())
+                            writeEvent("[DONE]")
+                        },
+                        onFailure = { error ->
+                            writeEvent(streamingErrorJson(error).toString())
+                            writeEvent("[DONE]")
+                        }
+                    )
+                } catch (_: Throwable) {
+                    // The client may have disconnected; closing the pipe stops the streaming response.
+                }
+            }
+        }.apply {
+            name = "LiteRT-LM-SSE-$completionId"
+            isDaemon = true
+            start()
         }
 
-        return newFixedLengthResponse(Response.Status.OK, "text/event-stream", body).apply {
+        return newChunkedResponse(Response.Status.OK, "text/event-stream", input).apply {
             addCorsHeaders()
             addHeader("Cache-Control", "no-cache")
             addHeader("Connection", "keep-alive")
+            addHeader("X-Accel-Buffering", "no")
         }
+    }
+
+    private fun chatCompletionChunkJson(
+        completionId: String,
+        created: Long,
+        role: String? = null,
+        content: String? = null,
+        finishReason: String? = null,
+    ): JSONObject {
+        val delta = JSONObject()
+        if (role != null) delta.put("role", role)
+        if (content != null) delta.put("content", content)
+
+        return JSONObject()
+            .put("id", completionId)
+            .put("object", "chat.completion.chunk")
+            .put("created", created)
+            .put("model", modelId)
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject()
+                        .put("index", 0)
+                        .put("delta", delta)
+                        .put("finish_reason", finishReason ?: JSONObject.NULL)
+                )
+            )
+    }
+
+    private fun streamingErrorJson(error: Throwable): JSONObject {
+        return JSONObject()
+            .put("error", JSONObject().put("message", "Generation failed: ${error.message}"))
     }
 
     private fun isAuthorized(session: IHTTPSession): Boolean {
@@ -309,5 +352,9 @@ class LocalHttpServer(
         addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
         addHeader("Access-Control-Max-Age", "86400")
         addHeader("Access-Control-Allow-Private-Network", "true")
+    }
+
+    private companion object {
+        const val STREAM_PIPE_BUFFER_BYTES = 64 * 1024
     }
 }
