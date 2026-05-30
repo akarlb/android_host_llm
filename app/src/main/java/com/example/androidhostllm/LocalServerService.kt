@@ -40,6 +40,7 @@ class LocalServerService : Service() {
         val apiKey = intent.getStringExtra(EXTRA_API_KEY)
         val mode = intent.getStringExtra(EXTRA_MODE) ?: "localhost"
         val displayUrl = intent.getStringExtra(EXTRA_DISPLAY_URL) ?: "http://127.0.0.1:$port"
+        ServerRegistry.liteRtLmManager.setResponseLength(AppPreferences(applicationContext).savedResponseLength())
 
         ServerRegistry.server?.stopServer()
         val server = LocalHttpServer(

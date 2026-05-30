@@ -67,6 +67,7 @@ class MainActivity : Activity() {
     private lateinit var serverStatusText: TextView
     private lateinit var urlsText: TextView
     private lateinit var apiKeyText: TextView
+    private lateinit var responseLengthSpinner: Spinner
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,6 +75,7 @@ class MainActivity : Activity() {
         liteRtLmManager = ServerRegistry.liteRtLmManager
         serverAuth = ServerAuth(applicationContext)
         appPreferences = AppPreferences(applicationContext)
+        liteRtLmManager.setResponseLength(appPreferences.savedResponseLength())
         modelDirectoryInfo = NetworkUtils.modelDirectory(applicationContext)
         setContentView(createContentView())
         updateSelectedPreset(ModelPreset.GEMMA_4_E2B)
@@ -167,7 +169,24 @@ class MainActivity : Activity() {
         loadButton = Button(this).apply { text = "Load Model"; setOnClickListener { loadModel() } }
         root.addView(loadButton)
 
-        root.addView(sectionTitle("3. Server"))
+        root.addView(sectionTitle("3. Response style"))
+        root.addView(bodyText("Response length hint applied to local chat prompts. Shorter responses usually finish faster."))
+        responseLengthSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, ResponseLength.entries.map { it.displayName })
+            setSelection(ResponseLength.entries.indexOf(appPreferences.savedResponseLength()).coerceAtLeast(0))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val value = ResponseLength.entries.getOrElse(position) { ResponseLength.MEDIUM }
+                    liteRtLmManager.setResponseLength(value)
+                    appPreferences.saveResponseLength(value)
+                    refreshUi()
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        root.addView(responseLengthSpinner)
+
+        root.addView(sectionTitle("4. Server"))
         val bindModeGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
         lanModeButton = RadioButton(this).apply { text = "LAN / Wi-Fi"; isChecked = true }
         localhostModeButton = RadioButton(this).apply { text = "Localhost only" }
@@ -228,9 +247,14 @@ class MainActivity : Activity() {
             appendLine(if (modelFile.exists()) "Model exists: ${NetworkUtils.formatBytes(modelFile.length())}" else "Model not found")
             if (partFile.exists()) appendLine("Partial download exists: ${NetworkUtils.formatBytes(partFile.length())}; Download will try to resume.")
             appendLine("Loaded: ${liteRtLmManager.isLoaded()} (${liteRtLmManager.backendStatus()})")
+            append(liteRtLmManager.performanceSummary())
         }
         val state = ServerRegistry.state
-        serverStatusText.text = "Server running: ${state.running}; bind: ${state.bindHost}:${state.port}; mode: ${state.mode}; model loaded: ${liteRtLmManager.isLoaded()}"
+        serverStatusText.text = buildString {
+            appendLine("Server running: ${state.running}; bind: ${state.bindHost}:${state.port}; mode: ${state.mode}; model loaded: ${liteRtLmManager.isLoaded()}")
+            appendLine("Response length: ${liteRtLmManager.responseLength().displayName}")
+            append(liteRtLmManager.performanceSummary())
+        }
         apiKeyText.text = "Local server API key (for LAN / Wi-Fi): ${serverAuth.getOrCreateApiKey()}"
         urlsText.text = buildUrlText(currentPort())
     }

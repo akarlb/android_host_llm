@@ -21,8 +21,18 @@ class AppPreferences(context: Context) {
         prefs.edit().remove(KEY_HF_TOKEN).apply()
     }
 
+    fun savedResponseLength(): ResponseLength {
+        val saved = prefs.getString(KEY_RESPONSE_LENGTH, ResponseLength.MEDIUM.name)
+        return runCatching { ResponseLength.valueOf(saved ?: ResponseLength.MEDIUM.name) }.getOrDefault(ResponseLength.MEDIUM)
+    }
+
+    fun saveResponseLength(value: ResponseLength) {
+        prefs.edit().putString(KEY_RESPONSE_LENGTH, value.name).apply()
+    }
+
     private companion object {
         const val KEY_MODEL_PATH = "model_path"
         const val KEY_HF_TOKEN = "hf_token"
+        const val KEY_RESPONSE_LENGTH = "response_length"
     }
 }
