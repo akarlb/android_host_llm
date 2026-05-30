@@ -1,0 +1,16 @@
+.gradle/
+build/
+app/build/
+local.properties
+.DS_Store
+
+# Generated Android/model artifacts should not be committed.
+*.apk
+*.aab
+*.litertlm
+*.gguf
+*.bin
+*.so
+
+# The PR pipeline rejects binary wrapper jars; use the text ./gradlew launcher.
+gradle/wrapper/gradle-wrapper.jar
