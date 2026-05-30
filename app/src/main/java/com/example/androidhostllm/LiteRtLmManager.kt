@@ -43,7 +43,7 @@ class LiteRtLmManager(private val appContext: Context) {
         mutex.withLock {
             runCatching {
                 val activeConversation = conversation ?: error("Model is not loaded")
-                activeConversation.sendMessage(prompt).text
+                activeConversation.sendMessage(prompt).toString()
             }
         }
     }
