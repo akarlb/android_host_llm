@@ -140,7 +140,7 @@ The token is not exposed through the local HTTP API and should not appear in ser
 
 The server supports two bind modes:
 
-- **LAN / Wi-Fi** (default): binds the HTTP server to `0.0.0.0`, displays URLs using detected non-loopback IPv4 LAN addresses, and requires the local server API key for `/v1/chat/completions`.
+- **LAN / Wi-Fi** (default): binds the HTTP server to `0.0.0.0` and displays URLs using detected non-loopback IPv4 LAN addresses. MVP no-auth mode is the default, so browser extensions and OpenAI-compatible clients can connect without a required API key.
 - **Localhost only**: binds to `127.0.0.1` for same-phone clients such as Termux.
 
 The phone and client must be on the same network. Some routers enable client isolation or firewall rules that block device-to-device traffic; if so, LAN requests may fail even when the app is working.
@@ -151,56 +151,73 @@ When the server runs, a foreground service shows a persistent notification with 
 
 ## Local server API key
 
-LAN mode exposes the endpoint to the local network, so the app generates a random local server API key on first launch using `SecureRandom` and stores it in app `SharedPreferences`. This is separate from any Hugging Face token.
+The app can generate and store a random local server API key using `SecureRandom`, but required API-key authentication is disabled by default for this MVP. This is separate from any Hugging Face token.
 
-The UI displays the local server API key and has a regenerate button. LAN mode requires it by default for `/v1/chat/completions`; `/health` is unauthenticated and returns only basic status such as:
+No API key is required for `/health`, `/v1/models`, or `/v1/chat/completions` while no-auth mode is active. The local HTTP API also sends CORS and Chrome Private Network Access headers so browser-based clients can make cross-origin LAN requests.
+
+Health responses return only basic status such as:
 
 ```json
 {"status":"ok","modelLoaded":true,"serverMode":"lan"}
 ```
 
-Authenticate generation requests with either header:
+If API-key enforcement is re-enabled in a future build, generation requests can authenticate with either `Authorization: Bearer <LOCAL_SERVER_KEY>` or `X-API-Key: <LOCAL_SERVER_KEY>`.
 
-```text
-Authorization: Bearer <LOCAL_SERVER_KEY>
-```
+## Page Assist / OpenAI-compatible clients
 
-or:
+Use these settings for Page Assist or another OpenAI-compatible client:
 
-```text
-X-API-Key: <LOCAL_SERVER_KEY>
-```
+- **Base URL:** `http://<PHONE_IP>:8080/v1`
+- **Model:** `local-litert-lm`
+- **API key:** leave blank, or put any placeholder if the UI requires one, because MVP no-auth mode is the default
+- **Chat endpoint used by clients:** `POST http://<PHONE_IP>:8080/v1/chat/completions`
+- **Models endpoint:** `GET http://<PHONE_IP>:8080/v1/models`
 
-Missing or wrong keys return:
-
-```json
-{"error":"Unauthorized"}
-```
+If Page Assist says “Failed to fetch”, open the Chrome extension service worker console and look for CORS, Private Network Access, `404 /v1/models`, or streaming parse errors.
 
 ## Curl examples from another device on the same Wi-Fi/LAN
 
-Health check:
+Health:
 
 ```sh
-curl http://<PHONE_IP>:8080/health
+curl -i http://<PHONE_IP>:8080/health
+```
+
+Models:
+
+```sh
+curl -i http://<PHONE_IP>:8080/v1/models
 ```
 
 Prompt request:
 
 ```sh
-curl -X POST http://<PHONE_IP>:8080/v1/chat/completions \
+curl -i -X POST http://<PHONE_IP>:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <LOCAL_SERVER_KEY>" \
   -d '{"prompt":"Hello. Confirm you are running on the phone."}'
 ```
 
-OpenAI-style messages array:
+Non-streaming chat:
 
 ```sh
-curl -X POST http://<PHONE_IP>:8080/v1/chat/completions \
+curl -i -X POST "http://<PHONE_IP>:8080/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: <LOCAL_SERVER_KEY>" \
-  -d '{"messages":[{"role":"user","content":"Hello. Confirm you are running on the phone."}]}'
+  -d '{"model":"local-litert-lm","messages":[{"role":"user","content":"Say hello."}],"stream":false}'
+```
+
+Streaming compatibility:
+
+```sh
+curl -N -X POST "http://<PHONE_IP>:8080/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"model":"local-litert-lm","messages":[{"role":"user","content":"Say hello."}],"stream":true}'
+```
+
+Browser CORS/PNA test: open a browser console and run:
+
+```js
+fetch("http://<PHONE_IP>:8080/v1/models").then(r => r.text()).then(console.log).catch(console.error)
 ```
 
 Responses include both a simple field:
@@ -209,7 +226,7 @@ Responses include both a simple field:
 {"response":"..."}
 ```
 
-and a minimal OpenAI-compatible convenience shape at `choices[0].message.content`.
+and an OpenAI-compatible shape at `choices[0].message.content`.
 
 ## Curl example from Termux on the same phone
 
@@ -221,7 +238,7 @@ If you started in localhost-only mode, call `http://127.0.0.1:8080/v1/chat/compl
 
 ## Known limitations
 
-- No streaming yet.
+- Streaming responses are compatibility SSE responses: the app generates the full response first, then sends OpenAI-style SSE chunks ending with `[DONE]`.
 - One active model/conversation at a time.
 - Model download is large and can take a long time.
 - Device battery management may kill the app unless the foreground service/notification is active or the app stays open.
