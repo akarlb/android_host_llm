@@ -345,7 +345,7 @@ class MainActivity : Activity() {
         val displayUrl = if (lanMode) {
             NetworkUtils.lanIpv4Candidates().firstOrNull()?.let { "http://$it:$port" } ?: "http://0.0.0.0:$port"
         } else "http://127.0.0.1:$port"
-        val requireApiKey = lanMode
+        val requireApiKey = false
         val apiKey = serverAuth.getOrCreateApiKey()
         activityScope.launch {
             runCatching {
