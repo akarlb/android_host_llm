@@ -20,8 +20,8 @@ class LiteRtLmManager(private val appContext: Context) {
         mutex.withLock {
             runCatching {
                 val modelFile = File(modelPath)
-                require(modelFile.exists()) { "Model file does not exist: $modelPath" }
-                require(modelFile.canRead()) { "Model file is not readable: $modelPath" }
+                require(modelFile.exists()) { "Model file does not exist: $modelPath. Put model.litertlm at the path displayed in the app, or edit the model path before loading." }
+                require(modelFile.canRead()) { "Model file is not readable: $modelPath. Check that the file was pushed to the displayed app-specific path and is readable by the app." }
 
                 closeLocked()
                 try {
