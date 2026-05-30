@@ -1,9 +1,6 @@
 package com.example.androidhostllm
 
-import android.Manifest
 import android.app.Activity
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.Button
@@ -16,11 +13,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class MainActivity : Activity() {
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var liteRtLmManager: LiteRtLmManager
     private var localHttpServer: LocalHttpServer? = null
+    private var defaultPathUsesInternalStorage = false
 
     private lateinit var modelPathField: EditText
     private lateinit var statusText: TextView
@@ -30,8 +29,10 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         liteRtLmManager = LiteRtLmManager(applicationContext)
-        setContentView(createContentView())
-        requestReadPermissionIfNeeded()
+        setContentView(createContentView(defaultModelPath()))
+        if (defaultPathUsesInternalStorage) {
+            statusText.text = "Warning: external files directory was unavailable; using internal app files directory."
+        }
     }
 
     override fun onDestroy() {
@@ -41,7 +42,7 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun createContentView(): LinearLayout {
+    private fun createContentView(initialModelPath: String): LinearLayout {
         val padding = (16 * resources.displayMetrics.density).toInt()
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -57,17 +58,17 @@ class MainActivity : Activity() {
             })
 
             addView(TextView(context).apply {
-                text = "Model path"
+                text = "Model path (copy this exact path when pushing the model)"
             })
 
             modelPathField = EditText(context).apply {
                 setSingleLine(true)
-                setText(DEFAULT_MODEL_PATH)
+                setText(initialModelPath)
             }
             addView(modelPathField)
 
             statusText = TextView(context).apply {
-                text = "Not loaded"
+                text = "Not loaded. Put model.litertlm at the path shown above, or edit the path."
                 textSize = 16f
             }
             addView(statusText)
@@ -98,12 +99,18 @@ class MainActivity : Activity() {
             return
         }
 
+        val parentDirectory = File(modelPath).parentFile
+        if (parentDirectory != null && !parentDirectory.exists() && !parentDirectory.mkdirs()) {
+            statusText.text = "Error: could not create model directory: ${parentDirectory.absolutePath}"
+            return
+        }
+
         loadButton.isEnabled = false
-        statusText.text = "Loading"
+        statusText.text = "Loading $modelPath"
         activityScope.launch {
             val result = liteRtLmManager.loadModel(modelPath)
             result.fold(
-                onSuccess = { statusText.text = "Loaded" },
+                onSuccess = { statusText.text = "Loaded: $modelPath" },
                 onFailure = { statusText.text = "Error: ${it.message}" }
             )
             loadButton.isEnabled = true
@@ -125,16 +132,14 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun requestReadPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT <= 32 &&
-            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), READ_REQUEST_CODE)
-        }
+    private fun defaultModelPath(): String {
+        val externalFilesDir = applicationContext.getExternalFilesDir(null)
+        val modelDirectory = externalFilesDir ?: filesDir.also { defaultPathUsesInternalStorage = true }
+        modelDirectory.mkdirs()
+        return File(modelDirectory, MODEL_FILE_NAME).absolutePath
     }
 
     private companion object {
-        const val DEFAULT_MODEL_PATH = "/sdcard/Download/model.litertlm"
-        const val READ_REQUEST_CODE = 1001
+        const val MODEL_FILE_NAME = "model.litertlm"
     }
 }

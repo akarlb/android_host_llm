@@ -26,6 +26,7 @@ android {
 }
 
 dependencies {
+    // TODO: Pin this to the verified LiteRT-LM Android SDK version after the first successful CI build resolves it.
     implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
