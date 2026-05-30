@@ -29,4 +29,6 @@ dependencies {
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.12.0")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.core:core-ktx:1.15.0")
 }
