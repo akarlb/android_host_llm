@@ -34,8 +34,13 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Diagnose debug dependency graph
+        run: |
+          ./gradlew :app:dependencies --configuration debugRuntimeClasspath
+          ./gradlew :app:dependencies --configuration debugCompileClasspath
+
       - name: Build debug APK
-        run: ./gradlew clean assembleDebug
+        run: ./gradlew clean assembleDebug --stacktrace --info
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

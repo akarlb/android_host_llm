@@ -8,7 +8,7 @@ The app is intentionally small: it has a simple screen for loading a user-select
 
 No Android Studio workflow is required. Install a command-line Android SDK with API 35, use JDK 17, and ensure `ANDROID_HOME` or `ANDROID_SDK_ROOT` points at the SDK. This project uses Android Gradle Plugin 8.7.x and should be built with Gradle 8.9 or newer.
 
-This repository intentionally does not commit `gradle-wrapper.jar` because the PR pipeline rejects binary files. The checked-in `./gradlew` script is text-only and delegates to a `gradle` executable on your `PATH` or to `GRADLE_CMD` if set. GitHub Actions installs Gradle explicitly before running `./gradlew`.
+This repository intentionally does not commit `gradle-wrapper.jar` because the PR pipeline rejects binary files. The checked-in `./gradlew` script is text-only and delegates to a `gradle` executable on your `PATH` or to `GRADLE_CMD` if set. GitHub Actions installs Gradle explicitly before running `./gradlew`. The project pins LiteRT-LM Android to `0.12.0` and uses Kotlin Android plugin `2.2.21` to match the Kotlin 2.2.x runtime metadata pulled by that SDK.
 
 From the repository root, run:
 
@@ -104,8 +104,10 @@ The response includes a simple `response` field and a minimal `choices[0].messag
 The repository includes a GitHub Actions workflow at `.github/workflows/build-apk.yml`. It runs on manual dispatch, pushes to `main`, and pull requests targeting `main`; installs Java 17, Android SDK packages, and Gradle 8.9; runs:
 
 ```sh
-./gradlew clean assembleDebug
+./gradlew clean assembleDebug --stacktrace --info
 ```
+
+Before that build step, CI also prints `debugRuntimeClasspath` and `debugCompileClasspath` dependency reports so Kotlin/Android dependency mismatches are visible in the job log.
 
 It uploads the debug APK artifact as `android-host-llm-debug-apk` from:
 
@@ -115,7 +117,6 @@ app/build/outputs/apk/debug/*.apk
 
 ## Known limitations
 
-- The LiteRT-LM dependency is still declared as `latest.release` until a successful build can resolve and verify a concrete SDK version in CI or a fully configured Android build environment. TODO: pin `com.google.ai.edge.litertlm:litertlm-android` to the verified version after the first successful build.
 - This is an MVP bridge, not a polished chat app.
 - The server binds to `127.0.0.1` only and has no authentication.
 - Only non-streaming generation is implemented.
