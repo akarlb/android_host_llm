@@ -385,9 +385,12 @@ class LocalHttpServer(
                 try {
                     writeEvent(chatCompletionChunkJson(completionId, created, role = "assistant").toString())
                     val result = runBlocking {
-                        liteRtLmManager.generateStreaming(prompt) { chunk ->
-                            writeEvent(chatCompletionChunkJson(completionId, created, content = chunk).toString())
-                        }
+                        liteRtLmManager.generateStreaming(
+                            prompt = prompt,
+                            onChunk = { chunk ->
+                                writeEvent(chatCompletionChunkJson(completionId, created, content = chunk).toString())
+                            },
+                        )
                     }
                     result.fold(
                         onSuccess = {
