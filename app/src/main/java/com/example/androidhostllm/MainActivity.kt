@@ -67,7 +67,11 @@ class MainActivity : Activity() {
     private lateinit var serverStatusText: TextView
     private lateinit var urlsText: TextView
     private lateinit var apiKeyText: TextView
-    private lateinit var responseLengthSpinner: Spinner
+    private lateinit var responseModeSpinner: Spinner
+    private lateinit var conversationModeSpinner: Spinner
+    private lateinit var mtpCheckBox: CheckBox
+    private lateinit var timeoutField: EditText
+    private lateinit var performanceText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,7 +79,7 @@ class MainActivity : Activity() {
         liteRtLmManager = ServerRegistry.liteRtLmManager
         serverAuth = ServerAuth(applicationContext)
         appPreferences = AppPreferences(applicationContext)
-        liteRtLmManager.setResponseLength(appPreferences.savedResponseLength())
+        applySavedGenerationSettings()
         modelDirectoryInfo = NetworkUtils.modelDirectory(applicationContext)
         setContentView(createContentView())
         updateSelectedPreset(ModelPreset.GEMMA_4_E2B)
@@ -169,22 +173,71 @@ class MainActivity : Activity() {
         loadButton = Button(this).apply { text = "Load Model"; setOnClickListener { loadModel() } }
         root.addView(loadButton)
 
-        root.addView(sectionTitle("3. Response style"))
-        root.addView(bodyText("Response length hint applied to local chat prompts. Shorter responses usually finish faster."))
-        responseLengthSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, ResponseLength.entries.map { it.displayName })
-            setSelection(ResponseLength.entries.indexOf(appPreferences.savedResponseLength()).coerceAtLeast(0))
+        root.addView(sectionTitle("3. Generation"))
+        root.addView(bodyText("Tip: For coding speed, use Coding concise mode and reset conversation when responses slow down."))
+        mtpCheckBox = CheckBox(this).apply {
+            text = "Enable GPU MTP / speculative decoding"
+            isChecked = appPreferences.savedSpeculativeDecodingRequested()
+            setOnCheckedChangeListener { _, checked ->
+                liteRtLmManager.setSpeculativeDecodingRequested(checked)
+                appPreferences.saveSpeculativeDecodingRequested(checked)
+                progressText.text = "MTP setting saved. Reload the model for this to take effect."
+                refreshUi()
+            }
+        }
+        root.addView(mtpCheckBox)
+        root.addView(bodyText("Changing MTP requires model reload. CPU fallback does not enable MTP."))
+        root.addView(TextView(this).apply { text = "Conversation mode" })
+        conversationModeSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, ConversationMode.entries.map { it.displayName })
+            setSelection(ConversationMode.entries.indexOf(appPreferences.savedConversationMode()).coerceAtLeast(0))
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    val value = ResponseLength.entries.getOrElse(position) { ResponseLength.MEDIUM }
-                    liteRtLmManager.setResponseLength(value)
-                    appPreferences.saveResponseLength(value)
+                    val value = ConversationMode.entries.getOrElse(position) { ConversationMode.PERSISTENT }
+                    liteRtLmManager.setConversationMode(value)
+                    appPreferences.saveConversationMode(value)
                     refreshUi()
                 }
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(responseLengthSpinner)
+        root.addView(conversationModeSpinner)
+        root.addView(TextView(this).apply { text = "Response mode" })
+        responseModeSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, ResponseMode.entries.map { it.displayName })
+            setSelection(ResponseMode.entries.indexOf(appPreferences.savedResponseMode()).coerceAtLeast(0))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val value = ResponseMode.entries.getOrElse(position) { ResponseMode.CODING_CONCISE }
+                    liteRtLmManager.setResponseMode(value)
+                    appPreferences.saveResponseMode(value)
+                    refreshUi()
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        root.addView(responseModeSpinner)
+        root.addView(TextView(this).apply { text = "Generation timeout seconds" })
+        timeoutField = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            setText(appPreferences.savedGenerationTimeoutSeconds().toString())
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    val value = s?.toString()?.toIntOrNull() ?: return
+                    val coerced = value.coerceIn(10, 600)
+                    liteRtLmManager.setGenerationTimeoutSeconds(coerced)
+                    appPreferences.saveGenerationTimeoutSeconds(coerced)
+                }
+            })
+        }
+        root.addView(timeoutField)
+        root.addView(Button(this).apply { text = "Reset Conversation"; setOnClickListener { resetConversation() } })
+        root.addView(Button(this).apply { text = "Cancel Current Generation"; setOnClickListener { cancelCurrentGeneration() } })
+        performanceText = bodyText("")
+        root.addView(performanceText)
 
         root.addView(sectionTitle("4. Server"))
         val bindModeGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
@@ -217,6 +270,13 @@ class MainActivity : Activity() {
     private fun sectionTitle(textValue: String) = TextView(this).apply { text = "\n$textValue"; textSize = 20f }
     private fun bodyText(textValue: String) = TextView(this).apply { text = textValue; textSize = 15f }
 
+    private fun applySavedGenerationSettings() {
+        liteRtLmManager.setResponseMode(appPreferences.savedResponseMode())
+        liteRtLmManager.setConversationMode(appPreferences.savedConversationMode())
+        liteRtLmManager.setSpeculativeDecodingRequested(appPreferences.savedSpeculativeDecodingRequested())
+        liteRtLmManager.setGenerationTimeoutSeconds(appPreferences.savedGenerationTimeoutSeconds())
+    }
+
     private fun updateSelectedPreset(preset: ModelPreset) {
         selectedPreset = preset
         val target = preset.targetFile(modelDirectoryInfo.directory)
@@ -247,14 +307,16 @@ class MainActivity : Activity() {
             appendLine(if (modelFile.exists()) "Model exists: ${NetworkUtils.formatBytes(modelFile.length())}" else "Model not found")
             if (partFile.exists()) appendLine("Partial download exists: ${NetworkUtils.formatBytes(partFile.length())}; Download will try to resume.")
             appendLine("Loaded: ${liteRtLmManager.isLoaded()} (${liteRtLmManager.backendStatus()})")
-            append(liteRtLmManager.performanceSummary())
+            appendLine("MTP: ${liteRtLmManager.mtpStatus()}")
         }
         val state = ServerRegistry.state
         serverStatusText.text = buildString {
             appendLine("Server running: ${state.running}; bind: ${state.bindHost}:${state.port}; mode: ${state.mode}; model loaded: ${liteRtLmManager.isLoaded()}")
-            appendLine("Response length: ${liteRtLmManager.responseLength().displayName}")
-            append(liteRtLmManager.performanceSummary())
+            appendLine("Conversation mode: ${liteRtLmManager.conversationMode().displayName}")
+            appendLine("Response mode: ${liteRtLmManager.responseMode().displayName}")
+            appendLine("Timeout: ${liteRtLmManager.generationTimeoutSeconds()}s")
         }
+        if (::performanceText.isInitialized) performanceText.text = liteRtLmManager.performanceSummary()
         apiKeyText.text = "Local server API key (for LAN / Wi-Fi): ${serverAuth.getOrCreateApiKey()}"
         urlsText.text = buildUrlText(currentPort())
     }
@@ -337,6 +399,7 @@ class MainActivity : Activity() {
     }
 
     private fun loadModel() {
+        applySavedGenerationSettings()
         val modelPath = modelPathField.text.toString().trim()
         appPreferences.saveModelPath(modelPath)
         if (modelPath.isBlank()) {
@@ -359,6 +422,25 @@ class MainActivity : Activity() {
             loadButton.isEnabled = true
             refreshUi()
         }
+    }
+
+    private fun resetConversation() {
+        activityScope.launch {
+            val result = liteRtLmManager.resetConversation()
+            result.fold(
+                onSuccess = { progressText.text = "Conversation reset" },
+                onFailure = { progressText.text = "Conversation reset failed: ${it.message}" }
+            )
+            refreshUi()
+        }
+    }
+
+    private fun cancelCurrentGeneration() {
+        liteRtLmManager.cancelCurrentGeneration().fold(
+            onSuccess = { progressText.text = "Cancel requested for current generation" },
+            onFailure = { progressText.text = it.message ?: "No active generation to cancel" }
+        )
+        refreshUi()
     }
 
     private fun startServer() {
