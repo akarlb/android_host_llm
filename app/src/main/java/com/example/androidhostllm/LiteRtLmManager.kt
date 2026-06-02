@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -49,6 +50,7 @@ class LiteRtLmManager(private val appContext: Context) {
     @Volatile private var activeGeneration: Boolean = false
     @Volatile private var lastErrorShortMessage: String? = null
     @Volatile private var currentGenerationJob: Job? = null
+    private val performanceHistory = ArrayDeque<PerformanceHistoryEntry>()
 
     suspend fun loadModel(modelPath: String): Result<Unit> = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -89,12 +91,18 @@ class LiteRtLmManager(private val appContext: Context) {
         }
     }
 
-    suspend fun generate(prompt: String): Result<String> = withContext(Dispatchers.IO) {
+    suspend fun generate(
+        prompt: String,
+        conversationModeOverride: ConversationMode? = null,
+        responseModeOverride: ResponseMode? = null,
+    ): Result<String> = withContext(Dispatchers.IO) {
         mutex.withLock {
             val generationStarted = beginGeneration(streaming = false, job = coroutineContext[Job])
+            val effectiveConversationMode = conversationModeOverride ?: conversationMode
+            val effectiveResponseMode = responseModeOverride ?: responseMode
             runCatching {
                 withTimeout(generationTimeoutSeconds * 1000L) {
-                    val activeConversation = createConversationForRequestLocked()
+                    val activeConversation = createConversationForRequestLocked(effectiveConversationMode)
                     try {
                         val output = activeConversation.sendMessage(prompt).toString()
                         finishGeneration(
@@ -102,10 +110,12 @@ class LiteRtLmManager(private val appContext: Context) {
                             outputChars = output.length,
                             firstChunkAt = System.currentTimeMillis(),
                             chunkCount = if (output.isNotEmpty()) 1 else 0,
+                            effectiveConversationMode = effectiveConversationMode,
+                            effectiveResponseMode = effectiveResponseMode,
                         )
                         output
                     } finally {
-                        closeRequestConversationIfNeeded(activeConversation)
+                        closeRequestConversationIfNeeded(activeConversation, effectiveConversationMode)
                     }
                 }
             }.recoverCatching { error ->
@@ -114,7 +124,15 @@ class LiteRtLmManager(private val appContext: Context) {
                 }
                 throw error
             }.onFailure {
-                finishGeneration(generationStarted, outputChars = 0, firstChunkAt = null, chunkCount = 0)
+                finishGeneration(
+                    startedAt = generationStarted,
+                    outputChars = 0,
+                    firstChunkAt = null,
+                    chunkCount = 0,
+                    effectiveConversationMode = effectiveConversationMode,
+                    effectiveResponseMode = effectiveResponseMode,
+                    error = it,
+                )
                 recordGenerationError(it)
             }
         }
@@ -123,34 +141,54 @@ class LiteRtLmManager(private val appContext: Context) {
     suspend fun generateStreaming(
         prompt: String,
         onChunk: suspend (String) -> Unit,
+        conversationModeOverride: ConversationMode? = null,
+        responseModeOverride: ResponseMode? = null,
     ): Result<String> = withContext(Dispatchers.IO) {
         mutex.withLock {
             val generationStarted = beginGeneration(streaming = true, job = coroutineContext[Job])
+            val effectiveConversationMode = conversationModeOverride ?: conversationMode
+            val effectiveResponseMode = responseModeOverride ?: responseMode
             runCatching {
                 withTimeout(generationTimeoutSeconds * 1000L) {
-                    val activeConversation = createConversationForRequestLocked()
+                    val activeConversation = createConversationForRequestLocked(effectiveConversationMode)
                     try {
                         val output = StringBuilder()
                         var firstChunkAt: Long? = null
                         var chunkCount = 0
+                        var previousText = ""
                         activeConversation.sendMessageAsync(prompt).collect { message ->
-                            val chunkText = message.toString()
-                            if (chunkText.isNotEmpty()) {
+                            val currentText = message.toString()
+                            val deltaText = if (currentText.startsWith(previousText)) {
+                                currentText.removePrefix(previousText)
+                            } else {
+                                currentText
+                            }
+                            if (currentText.length >= previousText.length || !currentText.startsWith(previousText)) {
+                                previousText = currentText
+                            }
+                            if (deltaText.isNotEmpty()) {
                                 if (firstChunkAt == null) {
                                     val chunkArrivedAt = System.currentTimeMillis()
                                     firstChunkAt = chunkArrivedAt
                                     lastFirstChunkLatencyMs = chunkArrivedAt - generationStarted
                                 }
                                 chunkCount += 1
-                                output.append(chunkText)
-                                onChunk(chunkText)
+                                output.append(deltaText)
+                                onChunk(deltaText)
                             }
                         }
                         val finalOutput = output.toString()
-                        finishGeneration(generationStarted, finalOutput.length, firstChunkAt, chunkCount)
+                        finishGeneration(
+                            startedAt = generationStarted,
+                            outputChars = finalOutput.length,
+                            firstChunkAt = firstChunkAt,
+                            chunkCount = chunkCount,
+                            effectiveConversationMode = effectiveConversationMode,
+                            effectiveResponseMode = effectiveResponseMode,
+                        )
                         finalOutput
                     } finally {
-                        closeRequestConversationIfNeeded(activeConversation)
+                        closeRequestConversationIfNeeded(activeConversation, effectiveConversationMode)
                     }
                 }
             }.recoverCatching { error ->
@@ -159,7 +197,15 @@ class LiteRtLmManager(private val appContext: Context) {
                 }
                 throw error
             }.onFailure {
-                finishGeneration(generationStarted, outputChars = 0, firstChunkAt = null, chunkCount = 0)
+                finishGeneration(
+                    startedAt = generationStarted,
+                    outputChars = 0,
+                    firstChunkAt = null,
+                    chunkCount = 0,
+                    effectiveConversationMode = effectiveConversationMode,
+                    effectiveResponseMode = effectiveResponseMode,
+                    error = it,
+                )
                 recordGenerationError(it)
             }
         }
@@ -188,6 +234,10 @@ class LiteRtLmManager(private val appContext: Context) {
             speculativeDecodingError = null
         }
     }
+
+    fun speculativeDecodingRequested(): Boolean = speculativeDecodingRequested
+
+    fun speculativeDecodingEnabled(): Boolean = speculativeDecodingEnabled
 
     fun setGenerationTimeoutSeconds(value: Int) {
         generationTimeoutSeconds = value.coerceIn(MIN_GENERATION_TIMEOUT_SECONDS, MAX_GENERATION_TIMEOUT_SECONDS)
@@ -221,8 +271,8 @@ class LiteRtLmManager(private val appContext: Context) {
         }
     }
 
-    fun applyResponseModeHint(prompt: String): String {
-        val instruction = when (responseMode) {
+    fun applyResponseModeHint(prompt: String, mode: ResponseMode = responseMode): String {
+        val instruction = when (mode) {
             ResponseMode.CODING_CONCISE -> "You are assisting with coding. Be direct. Prefer concise, actionable answers. Avoid long explanations unless asked. When giving code, prioritize the exact patch or command."
             ResponseMode.BALANCED -> "Answer clearly and directly."
             ResponseMode.DETAILED -> "Answer thoroughly when useful."
@@ -254,6 +304,17 @@ class LiteRtLmManager(private val appContext: Context) {
     }
 
     fun performanceJson(): JSONObject = performanceSnapshot().toJson()
+
+    fun performanceHistoryJson(): JSONObject {
+        val data = synchronized(performanceHistory) {
+            JSONArray().also { array ->
+                performanceHistory.forEach { array.put(it.toJson()) }
+            }
+        }
+        return JSONObject()
+            .put("count", data.length())
+            .put("data", data)
+    }
 
     fun performanceSummary(): String {
         val snapshot = performanceSnapshot()
@@ -334,13 +395,37 @@ class LiteRtLmManager(private val appContext: Context) {
         return now
     }
 
-    private fun finishGeneration(startedAt: Long, outputChars: Int, firstChunkAt: Long?, chunkCount: Int) {
+    private fun finishGeneration(
+        startedAt: Long,
+        outputChars: Int,
+        firstChunkAt: Long?,
+        chunkCount: Int,
+        effectiveConversationMode: ConversationMode,
+        effectiveResponseMode: ResponseMode,
+        error: Throwable? = null,
+    ) {
         val duration = System.currentTimeMillis() - startedAt
         lastGenerationDurationMs = duration
         lastFirstChunkLatencyMs = firstChunkAt?.let { it - startedAt }
         lastOutputChars = outputChars
         lastApproxCharsPerSecond = if (duration > 0) outputChars * 1000.0 / duration else 0.0
         lastChunkCount = chunkCount
+        addPerformanceHistory(
+            PerformanceHistoryEntry(
+                timestampMs = System.currentTimeMillis(),
+                streamingUsed = lastStreamingUsed,
+                firstChunkLatencyMs = lastFirstChunkLatencyMs,
+                generationDurationMs = lastGenerationDurationMs,
+                outputChars = lastOutputChars,
+                approxCharsPerSecond = lastApproxCharsPerSecond,
+                chunkCount = lastChunkCount,
+                backendStatus = backendStatus,
+                speculativeDecodingEnabled = speculativeDecodingEnabled,
+                conversationMode = effectiveConversationMode,
+                responseMode = effectiveResponseMode,
+                error = error?.let { shortMessage(it) },
+            )
+        )
         activeGeneration = false
         currentGenerationJob = null
     }
@@ -352,16 +437,25 @@ class LiteRtLmManager(private val appContext: Context) {
         currentGenerationJob = null
     }
 
-    private fun createConversationForRequestLocked(): Conversation {
-        return when (conversationMode) {
+    private fun createConversationForRequestLocked(effectiveConversationMode: ConversationMode): Conversation {
+        return when (effectiveConversationMode) {
             ConversationMode.PERSISTENT -> conversation ?: error("Model is not loaded")
             ConversationMode.FRESH_PER_REQUEST -> (engine ?: error("Model is not loaded")).createConversation()
         }
     }
 
-    private fun closeRequestConversationIfNeeded(requestConversation: Conversation) {
-        if (conversationMode == ConversationMode.FRESH_PER_REQUEST) {
+    private fun closeRequestConversationIfNeeded(requestConversation: Conversation, effectiveConversationMode: ConversationMode) {
+        if (effectiveConversationMode == ConversationMode.FRESH_PER_REQUEST) {
             requestConversation.close()
+        }
+    }
+
+    private fun addPerformanceHistory(entry: PerformanceHistoryEntry) {
+        synchronized(performanceHistory) {
+            performanceHistory.addLast(entry)
+            while (performanceHistory.size > PERFORMANCE_HISTORY_LIMIT) {
+                performanceHistory.removeFirst()
+            }
         }
     }
 
@@ -386,6 +480,7 @@ class LiteRtLmManager(private val appContext: Context) {
         const val DEFAULT_GENERATION_TIMEOUT_SECONDS = 180
         const val MIN_GENERATION_TIMEOUT_SECONDS = 10
         const val MAX_GENERATION_TIMEOUT_SECONDS = 600
+        const val PERFORMANCE_HISTORY_LIMIT = 20
     }
 }
 
@@ -429,6 +524,37 @@ data class PerformanceSnapshot(
             .put("totalErrors", totalErrors)
             .put("activeGeneration", activeGeneration)
             .put("lastErrorShortMessage", lastErrorShortMessage ?: JSONObject.NULL)
+    }
+}
+
+data class PerformanceHistoryEntry(
+    val timestampMs: Long,
+    val streamingUsed: Boolean,
+    val firstChunkLatencyMs: Long?,
+    val generationDurationMs: Long?,
+    val outputChars: Int,
+    val approxCharsPerSecond: Double,
+    val chunkCount: Int,
+    val backendStatus: String,
+    val speculativeDecodingEnabled: Boolean,
+    val conversationMode: ConversationMode,
+    val responseMode: ResponseMode,
+    val error: String?,
+) {
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("timestampMs", timestampMs)
+            .put("streamingUsed", streamingUsed)
+            .put("firstChunkLatencyMs", firstChunkLatencyMs ?: JSONObject.NULL)
+            .put("generationDurationMs", generationDurationMs ?: JSONObject.NULL)
+            .put("outputChars", outputChars)
+            .put("approxCharsPerSecond", String.format(Locale.US, "%.1f", approxCharsPerSecond).toDouble())
+            .put("chunkCount", chunkCount)
+            .put("backendStatus", backendStatus)
+            .put("speculativeDecodingEnabled", speculativeDecodingEnabled)
+            .put("conversationMode", conversationMode.name)
+            .put("responseMode", responseMode.name)
+            .put("error", error ?: JSONObject.NULL)
     }
 }
 
