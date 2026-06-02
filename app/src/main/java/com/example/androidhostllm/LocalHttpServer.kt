@@ -153,7 +153,13 @@ class LocalHttpServer(
 
         if (requestJson.has("conversationMode") && !requestJson.isNull("conversationMode")) {
             val value = parseConversationMode(requestJson.optString("conversationMode")) ?: return invalidConfigValue("conversationMode")
-            liteRtLmManager.setConversationMode(value)
+            val result = runBlocking { liteRtLmManager.setConversationMode(value) }
+            if (result.isFailure) {
+                return jsonResponse(
+                    Response.Status.BAD_REQUEST,
+                    JSONObject().put("error", result.exceptionOrNull()?.message ?: "Could not change conversation mode")
+                )
+            }
             appPreferences.saveConversationMode(value)
         }
 
@@ -213,37 +219,57 @@ class LocalHttpServer(
             parseResponseMode(requestJson.optString("responseMode")) ?: return invalidConfigValue("responseMode")
         } else null
 
-        val results = JSONArray()
-        repeat(iterations) { index ->
-            val effectiveResponseMode = responseModeOverride ?: liteRtLmManager.responseMode()
-            val effectiveConversationMode = conversationModeOverride ?: liteRtLmManager.conversationMode()
-            if (resetBeforeEach) {
-                val resetResult = runBlocking { liteRtLmManager.resetConversation() }
-                if (resetResult.isFailure) {
-                    results.put(benchmarkErrorJson(index + 1, effectiveConversationMode, effectiveResponseMode, resetResult.exceptionOrNull()))
-                    return@repeat
-                }
-            }
+        val previousConversationMode = liteRtLmManager.conversationMode()
+        val benchmarkConversationMode = conversationModeOverride ?: previousConversationMode
+        val switchResult = if (conversationModeOverride != null) {
+            runBlocking { liteRtLmManager.setConversationMode(benchmarkConversationMode) }
+        } else {
+            Result.success(Unit)
+        }
+        if (switchResult.isFailure) {
+            return jsonResponse(
+                Response.Status.BAD_REQUEST,
+                JSONObject().put("error", switchResult.exceptionOrNull()?.message ?: "Could not change conversation mode for benchmark")
+            )
+        }
 
-            val prompted = liteRtLmManager.applyResponseModeHint(prompt, effectiveResponseMode)
-            val result = runBlocking {
-                if (stream) {
-                    liteRtLmManager.generateStreaming(
-                        prompt = prompted,
-                        onChunk = { },
-                        conversationModeOverride = effectiveConversationMode,
-                        responseModeOverride = effectiveResponseMode,
-                    )
-                } else {
-                    liteRtLmManager.generate(
-                        prompt = prompted,
-                        conversationModeOverride = effectiveConversationMode,
-                        responseModeOverride = effectiveResponseMode,
-                    )
+        val results = JSONArray()
+        try {
+            repeat(iterations) { index ->
+                val effectiveResponseMode = responseModeOverride ?: liteRtLmManager.responseMode()
+                val effectiveConversationMode = benchmarkConversationMode
+                if (resetBeforeEach) {
+                    val resetResult = runBlocking { liteRtLmManager.resetConversation() }
+                    if (resetResult.isFailure) {
+                        results.put(benchmarkErrorJson(index + 1, effectiveConversationMode, effectiveResponseMode, resetResult.exceptionOrNull()))
+                        return@repeat
+                    }
                 }
+
+                val prompted = liteRtLmManager.applyResponseModeHint(prompt, effectiveResponseMode)
+                val result = runBlocking {
+                    if (stream) {
+                        liteRtLmManager.generateStreaming(
+                            prompt = prompted,
+                            onChunk = { },
+                            conversationModeOverride = effectiveConversationMode,
+                            responseModeOverride = effectiveResponseMode,
+                        )
+                    } else {
+                        liteRtLmManager.generate(
+                            prompt = prompted,
+                            conversationModeOverride = effectiveConversationMode,
+                            responseModeOverride = effectiveResponseMode,
+                        )
+                    }
+                }
+                val snapshot = liteRtLmManager.performanceSnapshot()
+                results.put(benchmarkResultJson(index + 1, snapshot, effectiveConversationMode, effectiveResponseMode, result.exceptionOrNull()))
             }
-            val snapshot = liteRtLmManager.performanceSnapshot()
-            results.put(benchmarkResultJson(index + 1, snapshot, effectiveConversationMode, effectiveResponseMode, result.exceptionOrNull()))
+        } finally {
+            if (conversationModeOverride != null && previousConversationMode != benchmarkConversationMode) {
+                runBlocking { liteRtLmManager.setConversationMode(previousConversationMode) }
+            }
         }
 
         return jsonResponse(
@@ -267,7 +293,7 @@ class LocalHttpServer(
                     Response.Status.OK,
                     JSONObject()
                         .put("status", "ok")
-                        .put("message", "Conversation reset")
+                        .put("message", it)
                 )
             },
             onFailure = { error ->
@@ -427,6 +453,8 @@ class LocalHttpServer(
             .put("speculativeDecodingRequested", liteRtLmManager.speculativeDecodingRequested())
             .put("speculativeDecodingEnabled", liteRtLmManager.speculativeDecodingEnabled())
             .put("conversationMode", liteRtLmManager.conversationMode().name)
+            .put("conversationActive", liteRtLmManager.conversationActive())
+            .put("activeGeneration", liteRtLmManager.activeGeneration())
             .put("responseMode", liteRtLmManager.responseMode().name)
             .put("generationTimeoutSeconds", liteRtLmManager.generationTimeoutSeconds())
             .put("serverMode", serverMode)

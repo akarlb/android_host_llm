@@ -316,7 +316,7 @@ Check performance metrics:
 curl http://<PHONE_IP>:8080/debug/perf
 ```
 
-The `/debug/perf` response includes backend status, model-loaded status, speculative-decoding requested/enabled/available status, last load duration, last generation start time, first-chunk latency, generation duration, output character count, approximate characters per second, chunk count, streaming/non-streaming mode, request/error totals, active-generation status, and the last short error message. It does not expose prompt text, Hugging Face tokens, or API keys.
+The `/debug/perf` response includes backend status, model-loaded status, speculative-decoding requested/enabled/available status, last load duration, last generation start time, first-chunk latency, generation duration, output character count, approximate characters per second, chunk count, streaming/non-streaming mode, request/error totals, conversation mode, conversation-active status, active-generation status, and the last short error message. It does not expose prompt text, Hugging Face tokens, or API keys.
 
 The `/debug/perf/history` endpoint returns the last 20 generation metric snapshots. It stores only timing/count/status data, not prompts or responses.
 
@@ -332,7 +332,7 @@ curl -X POST http://<PHONE_IP>:8080/debug/config \
   -d '{"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE","generationTimeoutSeconds":180}'
 ```
 
-`POST /debug/config` accepts optional `conversationMode`, `responseMode`, `generationTimeoutSeconds`, and `speculativeDecodingRequested` fields. Conversation and response mode changes apply immediately and are persisted. MTP setting changes are persisted but require a model reload to affect engine initialization.
+`POST /debug/config` accepts optional `conversationMode`, `responseMode`, `generationTimeoutSeconds`, and `speculativeDecodingRequested` fields. Conversation and response mode changes apply immediately and are persisted. Conversation mode changes are rejected while generation is active. MTP setting changes are persisted but require a model reload to affect engine initialization.
 
 Benchmark:
 
@@ -360,10 +360,11 @@ Resetting conversation can improve stability and speed during long coding sessio
 
 Conversation modes:
 
-- **Persistent conversation** keeps current behavior and retains chat memory inside the loaded LiteRT-LM conversation.
-- **Fresh conversation per request** creates and closes a temporary LiteRT-LM conversation for each request without reloading the model. This may improve isolation and stability for coding clients, but it loses chat memory between requests.
+- LiteRT-LM Android currently supports only one active conversation/session at a time.
+- **Persistent conversation** is the default. It reuses one active LiteRT-LM session, retains chat memory, and is currently the verified fastest/stable mode based on Pixel benchmark results.
+- **Fresh conversation per request** closes any existing session before each request, creates one temporary session, generates, and closes it afterward. It does not reload the model, but it loses chat memory between requests.
 
-For Page Assist and coding clients, test both conversation modes and compare `/debug/perf` output.
+For Page Assist and coding clients, use `/debug/benchmark` to compare modes and `/debug/perf` to inspect the current lifecycle state.
 
 Response modes:
 

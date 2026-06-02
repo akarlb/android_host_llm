@@ -211,7 +211,11 @@ class LiteRtLmManager(private val appContext: Context) {
         }
     }
 
-    fun isLoaded(): Boolean = engine != null && conversation != null
+    fun isLoaded(): Boolean = engine != null
+
+    fun conversationActive(): Boolean = conversation != null
+
+    fun activeGeneration(): Boolean = activeGeneration
 
     fun backendStatus(): String = backendStatus
 
@@ -221,8 +225,35 @@ class LiteRtLmManager(private val appContext: Context) {
 
     fun responseMode(): ResponseMode = responseMode
 
-    fun setConversationMode(value: ConversationMode) {
-        conversationMode = value
+    suspend fun setConversationMode(value: ConversationMode): Result<Unit> = withContext(Dispatchers.IO) {
+        if (activeGeneration) {
+            return@withContext Result.failure(IllegalStateException("Cannot change conversation mode while generation is active"))
+        }
+        mutex.withLock {
+            runCatching {
+                if (activeGeneration) error("Cannot change conversation mode while generation is active")
+                conversationMode = value
+                when (value) {
+                    ConversationMode.PERSISTENT -> {
+                        val activeEngine = engine
+                        if (activeEngine != null && conversation == null) {
+                            conversation = activeEngine.createConversation()
+                        }
+                    }
+                    ConversationMode.FRESH_PER_REQUEST -> {
+                        closeConversationLocked()
+                    }
+                }
+            }.onFailure {
+                lastErrorShortMessage = shortMessage(it)
+            }
+        }
+    }
+
+    fun setConversationModePreference(value: ConversationMode) {
+        if (engine == null) {
+            conversationMode = value
+        }
     }
 
     fun conversationMode(): ConversationMode = conversationMode
@@ -255,7 +286,7 @@ class LiteRtLmManager(private val appContext: Context) {
         }
     }
 
-    suspend fun resetConversation(): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun resetConversation(): Result<String> = withContext(Dispatchers.IO) {
         if (activeGeneration) {
             return@withContext Result.failure(IllegalStateException("Cannot reset while generation is active"))
         }
@@ -263,8 +294,17 @@ class LiteRtLmManager(private val appContext: Context) {
             runCatching {
                 if (activeGeneration) error("Cannot reset while generation is active")
                 val activeEngine = engine ?: error("Model is not loaded")
-                conversation?.close()
-                conversation = activeEngine.createConversation()
+                when (conversationMode) {
+                    ConversationMode.PERSISTENT -> {
+                        closeConversationLocked()
+                        conversation = activeEngine.createConversation()
+                        "Conversation reset"
+                    }
+                    ConversationMode.FRESH_PER_REQUEST -> {
+                        closeConversationLocked()
+                        "Fresh-per-request conversation state cleared"
+                    }
+                }
             }.onFailure {
                 lastErrorShortMessage = shortMessage(it)
             }
@@ -299,6 +339,8 @@ class LiteRtLmManager(private val appContext: Context) {
             totalRequests = totalRequests,
             totalErrors = totalErrors,
             activeGeneration = activeGeneration,
+            conversationMode = conversationMode,
+            conversationActive = conversationActive(),
             lastErrorShortMessage = lastErrorShortMessage,
         )
     }
@@ -327,6 +369,8 @@ class LiteRtLmManager(private val appContext: Context) {
             appendLine("Last chars/sec: ${String.format(Locale.US, "%.1f", snapshot.lastApproxCharsPerSecond)}")
             appendLine("Last chunk count: ${snapshot.lastChunkCount}")
             appendLine("Total requests / errors: ${snapshot.totalRequests} / ${snapshot.totalErrors}")
+            appendLine("Conversation mode: ${snapshot.conversationMode.displayName}")
+            appendLine("Conversation active: ${if (snapshot.conversationActive) "yes" else "no"}")
             appendLine("Active generation: ${if (snapshot.activeGeneration) "yes" else "no"}")
         }
     }
@@ -352,7 +396,11 @@ class LiteRtLmManager(private val appContext: Context) {
         )
         newEngine.initialize()
         engine = newEngine
-        conversation = newEngine.createConversation()
+        conversation = if (conversationMode == ConversationMode.PERSISTENT) {
+            newEngine.createConversation()
+        } else {
+            null
+        }
         backendStatus = status
     }
 
@@ -439,13 +487,22 @@ class LiteRtLmManager(private val appContext: Context) {
 
     private fun createConversationForRequestLocked(effectiveConversationMode: ConversationMode): Conversation {
         return when (effectiveConversationMode) {
-            ConversationMode.PERSISTENT -> conversation ?: error("Model is not loaded")
-            ConversationMode.FRESH_PER_REQUEST -> (engine ?: error("Model is not loaded")).createConversation()
+            ConversationMode.PERSISTENT -> {
+                val activeEngine = engine ?: error("Model is not loaded")
+                conversation ?: activeEngine.createConversation().also { conversation = it }
+            }
+            ConversationMode.FRESH_PER_REQUEST -> {
+                closeConversationLocked()
+                (engine ?: error("Model is not loaded")).createConversation()
+            }
         }
     }
 
     private fun closeRequestConversationIfNeeded(requestConversation: Conversation, effectiveConversationMode: ConversationMode) {
         if (effectiveConversationMode == ConversationMode.FRESH_PER_REQUEST) {
+            if (conversation === requestConversation) {
+                conversation = null
+            }
             requestConversation.close()
         }
     }
@@ -460,14 +517,19 @@ class LiteRtLmManager(private val appContext: Context) {
     }
 
     private fun closeLocked(resetStatus: Boolean = true) {
-        conversation?.close()
-        conversation = null
+        closeConversationLocked()
         engine?.close()
         engine = null
         setSpeculativeDecoding(false)
         activeGeneration = false
         currentGenerationJob = null
         if (resetStatus) backendStatus = "Not loaded"
+    }
+
+    private fun closeConversationLocked() {
+        val activeConversation = conversation
+        conversation = null
+        activeConversation?.close()
     }
 
     private fun formatMs(value: Long?): String = value?.let { "${it}ms" } ?: "n/a"
@@ -502,6 +564,8 @@ data class PerformanceSnapshot(
     val totalRequests: Long,
     val totalErrors: Long,
     val activeGeneration: Boolean,
+    val conversationMode: ConversationMode,
+    val conversationActive: Boolean,
     val lastErrorShortMessage: String?,
 ) {
     fun toJson(): JSONObject {
@@ -523,6 +587,8 @@ data class PerformanceSnapshot(
             .put("totalRequests", totalRequests)
             .put("totalErrors", totalErrors)
             .put("activeGeneration", activeGeneration)
+            .put("conversationMode", conversationMode.name)
+            .put("conversationActive", conversationActive)
             .put("lastErrorShortMessage", lastErrorShortMessage ?: JSONObject.NULL)
     }
 }

@@ -194,9 +194,19 @@ class MainActivity : Activity() {
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     val value = ConversationMode.entries.getOrElse(position) { ConversationMode.PERSISTENT }
-                    liteRtLmManager.setConversationMode(value)
-                    appPreferences.saveConversationMode(value)
-                    refreshUi()
+                    activityScope.launch {
+                        val result = liteRtLmManager.setConversationMode(value)
+                        result.fold(
+                            onSuccess = {
+                                appPreferences.saveConversationMode(value)
+                                progressText.text = "Conversation mode: ${value.displayName}"
+                            },
+                            onFailure = {
+                                progressText.text = it.message ?: "Could not change conversation mode"
+                            }
+                        )
+                        refreshUi()
+                    }
                 }
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
@@ -272,7 +282,7 @@ class MainActivity : Activity() {
 
     private fun applySavedGenerationSettings() {
         liteRtLmManager.setResponseMode(appPreferences.savedResponseMode())
-        liteRtLmManager.setConversationMode(appPreferences.savedConversationMode())
+        liteRtLmManager.setConversationModePreference(appPreferences.savedConversationMode())
         liteRtLmManager.setSpeculativeDecodingRequested(appPreferences.savedSpeculativeDecodingRequested())
         liteRtLmManager.setGenerationTimeoutSeconds(appPreferences.savedGenerationTimeoutSeconds())
     }
@@ -447,7 +457,7 @@ class MainActivity : Activity() {
         activityScope.launch {
             val result = liteRtLmManager.resetConversation()
             result.fold(
-                onSuccess = { progressText.text = "Conversation reset" },
+                onSuccess = { progressText.text = it },
                 onFailure = { progressText.text = "Conversation reset failed: ${it.message}" }
             )
             refreshUi()

@@ -42,7 +42,9 @@ class LocalServerService : Service() {
         val displayUrl = intent.getStringExtra(EXTRA_DISPLAY_URL) ?: "http://127.0.0.1:$port"
         val preferences = AppPreferences(applicationContext)
         ServerRegistry.liteRtLmManager.setResponseMode(preferences.savedResponseMode())
-        ServerRegistry.liteRtLmManager.setConversationMode(preferences.savedConversationMode())
+        kotlinx.coroutines.runBlocking {
+            ServerRegistry.liteRtLmManager.setConversationMode(preferences.savedConversationMode())
+        }
         ServerRegistry.liteRtLmManager.setSpeculativeDecodingRequested(preferences.savedSpeculativeDecodingRequested())
         ServerRegistry.liteRtLmManager.setGenerationTimeoutSeconds(preferences.savedGenerationTimeoutSeconds())
 
