@@ -8,10 +8,15 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancel
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -20,25 +25,34 @@ class LiteRtLmManager(private val appContext: Context) {
     private val mutex = Mutex()
     private var engine: Engine? = null
     private var conversation: Conversation? = null
+
     @Volatile private var backendStatus: String = "Not loaded"
-    @Volatile private var responseLength: ResponseLength = ResponseLength.MEDIUM
+    @Volatile private var responseMode: ResponseMode = ResponseMode.CODING_CONCISE
+    @Volatile private var conversationMode: ConversationMode = ConversationMode.PERSISTENT
+    @Volatile private var generationTimeoutSeconds: Int = DEFAULT_GENERATION_TIMEOUT_SECONDS
 
-    private val enableSpeculativeDecodingForGpu: Boolean = true
+    @Volatile private var speculativeDecodingRequested: Boolean = true
     @Volatile private var speculativeDecodingEnabled: Boolean = false
+    @Volatile private var speculativeDecodingAvailable: Boolean = true
+    @Volatile private var speculativeDecodingError: String? = null
 
-    @Volatile private var lastLoadStartedAt: Long? = null
     @Volatile private var lastLoadDurationMs: Long? = null
-    @Volatile private var lastGenerationStartedAt: Long? = null
+    @Volatile private var lastGenerationStartedAtMs: Long? = null
     @Volatile private var lastFirstChunkLatencyMs: Long? = null
     @Volatile private var lastGenerationDurationMs: Long? = null
     @Volatile private var lastOutputChars: Int = 0
     @Volatile private var lastApproxCharsPerSecond: Double = 0.0
+    @Volatile private var lastChunkCount: Int = 0
     @Volatile private var lastStreamingUsed: Boolean = false
+    @Volatile private var totalRequests: Long = 0
+    @Volatile private var totalErrors: Long = 0
+    @Volatile private var activeGeneration: Boolean = false
+    @Volatile private var lastErrorShortMessage: String? = null
+    @Volatile private var currentGenerationJob: Job? = null
 
     suspend fun loadModel(modelPath: String): Result<Unit> = withContext(Dispatchers.IO) {
         mutex.withLock {
             val loadStarted = System.currentTimeMillis()
-            lastLoadStartedAt = loadStarted
             lastLoadDurationMs = null
             runCatching {
                 val modelFile = File(modelPath)
@@ -47,11 +61,21 @@ class LiteRtLmManager(private val appContext: Context) {
 
                 closeLocked()
                 try {
-                    initialize(modelPath, Backend.GPU(), "Loaded with GPU", enableSpeculativeDecoding = enableSpeculativeDecodingForGpu)
+                    initialize(
+                        modelPath = modelPath,
+                        backend = Backend.GPU(),
+                        status = "Loaded with GPU",
+                        enableSpeculativeDecoding = speculativeDecodingRequested,
+                    )
                 } catch (gpuError: Throwable) {
                     closeLocked()
                     try {
-                        initialize(modelPath, Backend.CPU(), "GPU failed, loaded with CPU", enableSpeculativeDecoding = false)
+                        initialize(
+                            modelPath = modelPath,
+                            backend = Backend.CPU(),
+                            status = "GPU failed, loaded with CPU",
+                            enableSpeculativeDecoding = false,
+                        )
                     } catch (cpuError: Throwable) {
                         closeLocked(resetStatus = false)
                         backendStatus = "Failed to load"
@@ -67,45 +91,76 @@ class LiteRtLmManager(private val appContext: Context) {
 
     suspend fun generate(prompt: String): Result<String> = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val generationStarted = beginGeneration(streaming = false)
+            val generationStarted = beginGeneration(streaming = false, job = coroutineContext[Job])
             runCatching {
-                val activeConversation = conversation ?: error("Model is not loaded")
-                val output = activeConversation.sendMessage(prompt).toString()
-                finishGeneration(generationStarted, output.length, firstChunkAt = System.currentTimeMillis())
-                output
+                withTimeout(generationTimeoutSeconds * 1000L) {
+                    val activeConversation = createConversationForRequestLocked()
+                    try {
+                        val output = activeConversation.sendMessage(prompt).toString()
+                        finishGeneration(
+                            startedAt = generationStarted,
+                            outputChars = output.length,
+                            firstChunkAt = System.currentTimeMillis(),
+                            chunkCount = if (output.isNotEmpty()) 1 else 0,
+                        )
+                        output
+                    } finally {
+                        closeRequestConversationIfNeeded(activeConversation)
+                    }
+                }
+            }.recoverCatching { error ->
+                if (error is TimeoutCancellationException) {
+                    throw GenerationTimeoutException(generationTimeoutSeconds)
+                }
+                throw error
             }.onFailure {
-                finishGeneration(generationStarted, outputChars = 0, firstChunkAt = null)
+                finishGeneration(generationStarted, outputChars = 0, firstChunkAt = null, chunkCount = 0)
+                recordGenerationError(it)
             }
         }
     }
 
     suspend fun generateStreaming(
         prompt: String,
-        onChunk: suspend (String) -> Unit
+        onChunk: suspend (String) -> Unit,
     ): Result<String> = withContext(Dispatchers.IO) {
         mutex.withLock {
-            val generationStarted = beginGeneration(streaming = true)
+            val generationStarted = beginGeneration(streaming = true, job = coroutineContext[Job])
             runCatching {
-                val activeConversation = conversation ?: error("Model is not loaded")
-                val output = StringBuilder()
-                var firstChunkAt: Long? = null
-                activeConversation.sendMessageAsync(prompt).collect { message ->
-                    val chunkText = message.toString()
-                    if (chunkText.isNotEmpty()) {
-                        if (firstChunkAt == null) {
-                            val chunkArrivedAt = System.currentTimeMillis()
-                            firstChunkAt = chunkArrivedAt
-                            lastFirstChunkLatencyMs = chunkArrivedAt - generationStarted
+                withTimeout(generationTimeoutSeconds * 1000L) {
+                    val activeConversation = createConversationForRequestLocked()
+                    try {
+                        val output = StringBuilder()
+                        var firstChunkAt: Long? = null
+                        var chunkCount = 0
+                        activeConversation.sendMessageAsync(prompt).collect { message ->
+                            val chunkText = message.toString()
+                            if (chunkText.isNotEmpty()) {
+                                if (firstChunkAt == null) {
+                                    val chunkArrivedAt = System.currentTimeMillis()
+                                    firstChunkAt = chunkArrivedAt
+                                    lastFirstChunkLatencyMs = chunkArrivedAt - generationStarted
+                                }
+                                chunkCount += 1
+                                output.append(chunkText)
+                                onChunk(chunkText)
+                            }
                         }
-                        output.append(chunkText)
-                        onChunk(chunkText)
+                        val finalOutput = output.toString()
+                        finishGeneration(generationStarted, finalOutput.length, firstChunkAt, chunkCount)
+                        finalOutput
+                    } finally {
+                        closeRequestConversationIfNeeded(activeConversation)
                     }
                 }
-                val finalOutput = output.toString()
-                finishGeneration(generationStarted, finalOutput.length, firstChunkAt)
-                finalOutput
+            }.recoverCatching { error ->
+                if (error is TimeoutCancellationException) {
+                    throw GenerationTimeoutException(generationTimeoutSeconds)
+                }
+                throw error
             }.onFailure {
-                finishGeneration(generationStarted, outputChars = 0, firstChunkAt = null)
+                finishGeneration(generationStarted, outputChars = 0, firstChunkAt = null, chunkCount = 0)
+                recordGenerationError(it)
             }
         }
     }
@@ -114,46 +169,111 @@ class LiteRtLmManager(private val appContext: Context) {
 
     fun backendStatus(): String = backendStatus
 
-    fun setResponseLength(value: ResponseLength) {
-        responseLength = value
+    fun setResponseMode(value: ResponseMode) {
+        responseMode = value
     }
 
-    fun responseLength(): ResponseLength = responseLength
+    fun responseMode(): ResponseMode = responseMode
 
-    fun applyResponseLengthHint(prompt: String): String {
-        val instruction = when (responseLength) {
-            ResponseLength.SHORT -> "Answer concisely in 3–5 sentences unless the user explicitly asks for more detail."
-            ResponseLength.MEDIUM -> "Answer clearly and directly."
-            ResponseLength.LONG -> null
+    fun setConversationMode(value: ConversationMode) {
+        conversationMode = value
+    }
+
+    fun conversationMode(): ConversationMode = conversationMode
+
+    fun setSpeculativeDecodingRequested(value: Boolean) {
+        speculativeDecodingRequested = value
+        if (!value) {
+            speculativeDecodingEnabled = false
+            speculativeDecodingError = null
         }
-        return if (instruction == null) prompt else "$instruction\n\n$prompt"
     }
 
-    fun performanceSnapshot(): JSONObject {
-        return JSONObject()
-            .put("backendStatus", backendStatus)
-            .put("modelLoaded", isLoaded())
-            .put("speculativeDecodingEnabled", speculativeDecodingEnabled)
-            .put("lastLoadStartedAt", lastLoadStartedAt ?: JSONObject.NULL)
-            .put("lastLoadDurationMs", lastLoadDurationMs ?: JSONObject.NULL)
-            .put("lastGenerationStartedAt", lastGenerationStartedAt ?: JSONObject.NULL)
-            .put("lastFirstChunkLatencyMs", lastFirstChunkLatencyMs ?: JSONObject.NULL)
-            .put("lastGenerationDurationMs", lastGenerationDurationMs ?: JSONObject.NULL)
-            .put("lastOutputChars", lastOutputChars)
-            .put("lastApproxCharsPerSecond", String.format(Locale.US, "%.1f", lastApproxCharsPerSecond).toDouble())
-            .put("lastStreamingUsed", lastStreamingUsed)
+    fun setGenerationTimeoutSeconds(value: Int) {
+        generationTimeoutSeconds = value.coerceIn(MIN_GENERATION_TIMEOUT_SECONDS, MAX_GENERATION_TIMEOUT_SECONDS)
     }
+
+    fun generationTimeoutSeconds(): Int = generationTimeoutSeconds
+
+    fun cancelCurrentGeneration(): Result<Unit> {
+        val job = currentGenerationJob
+        return if (job == null || !activeGeneration) {
+            Result.failure(IllegalStateException("No active generation to cancel"))
+        } else {
+            job.cancel()
+            Result.success(Unit)
+        }
+    }
+
+    suspend fun resetConversation(): Result<Unit> = withContext(Dispatchers.IO) {
+        if (activeGeneration) {
+            return@withContext Result.failure(IllegalStateException("Cannot reset while generation is active"))
+        }
+        mutex.withLock {
+            runCatching {
+                if (activeGeneration) error("Cannot reset while generation is active")
+                val activeEngine = engine ?: error("Model is not loaded")
+                conversation?.close()
+                conversation = activeEngine.createConversation()
+            }.onFailure {
+                lastErrorShortMessage = shortMessage(it)
+            }
+        }
+    }
+
+    fun applyResponseModeHint(prompt: String): String {
+        val instruction = when (responseMode) {
+            ResponseMode.CODING_CONCISE -> "You are assisting with coding. Be direct. Prefer concise, actionable answers. Avoid long explanations unless asked. When giving code, prioritize the exact patch or command."
+            ResponseMode.BALANCED -> "Answer clearly and directly."
+            ResponseMode.DETAILED -> "Answer thoroughly when useful."
+        }
+        return "$instruction\n\n$prompt"
+    }
+
+    fun performanceSnapshot(): PerformanceSnapshot {
+        return PerformanceSnapshot(
+            backendStatus = backendStatus,
+            modelLoaded = isLoaded(),
+            speculativeDecodingRequested = speculativeDecodingRequested,
+            speculativeDecodingEnabled = speculativeDecodingEnabled,
+            speculativeDecodingAvailable = speculativeDecodingAvailable,
+            speculativeDecodingError = speculativeDecodingError,
+            lastLoadDurationMs = lastLoadDurationMs,
+            lastGenerationStartedAtMs = lastGenerationStartedAtMs,
+            lastFirstChunkLatencyMs = lastFirstChunkLatencyMs,
+            lastGenerationDurationMs = lastGenerationDurationMs,
+            lastOutputChars = lastOutputChars,
+            lastApproxCharsPerSecond = lastApproxCharsPerSecond,
+            lastChunkCount = lastChunkCount,
+            lastStreamingUsed = lastStreamingUsed,
+            totalRequests = totalRequests,
+            totalErrors = totalErrors,
+            activeGeneration = activeGeneration,
+            lastErrorShortMessage = lastErrorShortMessage,
+        )
+    }
+
+    fun performanceJson(): JSONObject = performanceSnapshot().toJson()
 
     fun performanceSummary(): String {
         val snapshot = performanceSnapshot()
-        val speculativeText = if (snapshot.optBoolean("speculativeDecodingEnabled")) "enabled" else "unavailable / disabled"
         return buildString {
-            appendLine("Backend: ${snapshot.optString("backendStatus")}")
-            appendLine("MTP/speculative decoding: $speculativeText")
-            appendLine("Last generation: ${formatMs(snapshot.optLongOrNull("lastGenerationDurationMs"))}")
-            appendLine("First chunk latency: ${formatMs(snapshot.optLongOrNull("lastFirstChunkLatencyMs"))}")
-            appendLine("Approx chars/sec: ${String.format(Locale.US, "%.1f", snapshot.optDouble("lastApproxCharsPerSecond", 0.0))}")
+            appendLine("Backend used: ${snapshot.backendStatus}")
+            appendLine("MTP: ${mtpStatus()}")
+            appendLine("Last load time: ${formatMs(snapshot.lastLoadDurationMs)}")
+            appendLine("Last first chunk latency: ${formatMs(snapshot.lastFirstChunkLatencyMs)}")
+            appendLine("Last generation duration: ${formatMs(snapshot.lastGenerationDurationMs)}")
+            appendLine("Last chars/sec: ${String.format(Locale.US, "%.1f", snapshot.lastApproxCharsPerSecond)}")
+            appendLine("Last chunk count: ${snapshot.lastChunkCount}")
+            appendLine("Total requests / errors: ${snapshot.totalRequests} / ${snapshot.totalErrors}")
+            appendLine("Active generation: ${if (snapshot.activeGeneration) "yes" else "no"}")
         }
+    }
+
+    fun mtpStatus(): String = when {
+        speculativeDecodingEnabled -> "enabled"
+        !speculativeDecodingAvailable -> "unavailable"
+        else -> "disabled"
     }
 
     fun close() {
@@ -170,35 +290,79 @@ class LiteRtLmManager(private val appContext: Context) {
             )
         )
         newEngine.initialize()
-        val newConversation = newEngine.createConversation()
         engine = newEngine
-        conversation = newConversation
+        conversation = newEngine.createConversation()
         backendStatus = status
     }
 
     @OptIn(ExperimentalApi::class)
     private fun setSpeculativeDecoding(enabled: Boolean) {
-        ExperimentalFlags.enableSpeculativeDecoding = enabled
-        speculativeDecodingEnabled = enabled
+        if (!enabled) {
+            runCatching { ExperimentalFlags.enableSpeculativeDecoding = false }
+            speculativeDecodingEnabled = false
+            return
+        }
+        runCatching {
+            ExperimentalFlags.enableSpeculativeDecoding = true
+        }.fold(
+            onSuccess = {
+                speculativeDecodingAvailable = true
+                speculativeDecodingEnabled = true
+                speculativeDecodingError = null
+            },
+            onFailure = {
+                speculativeDecodingAvailable = false
+                speculativeDecodingEnabled = false
+                speculativeDecodingError = shortMessage(it)
+            },
+        )
     }
 
-    private fun beginGeneration(streaming: Boolean): Long {
+    private fun beginGeneration(streaming: Boolean, job: Job?): Long {
         val now = System.currentTimeMillis()
-        lastGenerationStartedAt = now
+        totalRequests += 1
+        activeGeneration = true
+        currentGenerationJob = job
+        lastGenerationStartedAtMs = now
         lastFirstChunkLatencyMs = null
         lastGenerationDurationMs = null
         lastOutputChars = 0
         lastApproxCharsPerSecond = 0.0
+        lastChunkCount = 0
         lastStreamingUsed = streaming
+        lastErrorShortMessage = null
         return now
     }
 
-    private fun finishGeneration(startedAt: Long, outputChars: Int, firstChunkAt: Long?) {
+    private fun finishGeneration(startedAt: Long, outputChars: Int, firstChunkAt: Long?, chunkCount: Int) {
         val duration = System.currentTimeMillis() - startedAt
         lastGenerationDurationMs = duration
         lastFirstChunkLatencyMs = firstChunkAt?.let { it - startedAt }
         lastOutputChars = outputChars
         lastApproxCharsPerSecond = if (duration > 0) outputChars * 1000.0 / duration else 0.0
+        lastChunkCount = chunkCount
+        activeGeneration = false
+        currentGenerationJob = null
+    }
+
+    private fun recordGenerationError(error: Throwable) {
+        totalErrors += 1
+        lastErrorShortMessage = shortMessage(error)
+        activeGeneration = false
+        currentGenerationJob = null
+    }
+
+    private fun createConversationForRequestLocked(): Conversation {
+        return when (conversationMode) {
+            ConversationMode.PERSISTENT -> conversation ?: error("Model is not loaded")
+            ConversationMode.FRESH_PER_REQUEST -> (engine ?: error("Model is not loaded")).createConversation()
+        }
+    }
+
+    private fun closeRequestConversationIfNeeded(requestConversation: Conversation) {
+        if (conversationMode == ConversationMode.FRESH_PER_REQUEST) {
+            requestConversation.close()
+        }
     }
 
     private fun closeLocked(resetStatus: Boolean = true) {
@@ -207,24 +371,88 @@ class LiteRtLmManager(private val appContext: Context) {
         engine?.close()
         engine = null
         setSpeculativeDecoding(false)
+        activeGeneration = false
+        currentGenerationJob = null
         if (resetStatus) backendStatus = "Not loaded"
     }
 
-    private fun JSONObject.optLongOrNull(name: String): Long? {
-        return if (isNull(name)) null else optLong(name)
+    private fun formatMs(value: Long?): String = value?.let { "${it}ms" } ?: "n/a"
+
+    private fun shortMessage(error: Throwable): String {
+        return (error.message ?: error::class.java.simpleName).take(160)
     }
 
-    private fun formatMs(value: Long?): String = value?.let { "${it}ms" } ?: "n/a"
+    private companion object {
+        const val DEFAULT_GENERATION_TIMEOUT_SECONDS = 180
+        const val MIN_GENERATION_TIMEOUT_SECONDS = 10
+        const val MAX_GENERATION_TIMEOUT_SECONDS = 600
+    }
 }
 
-enum class ResponseLength(val displayName: String) {
-    SHORT("Short"),
-    MEDIUM("Medium"),
-    LONG("Long");
+data class PerformanceSnapshot(
+    val backendStatus: String,
+    val modelLoaded: Boolean,
+    val speculativeDecodingRequested: Boolean,
+    val speculativeDecodingEnabled: Boolean,
+    val speculativeDecodingAvailable: Boolean,
+    val speculativeDecodingError: String?,
+    val lastLoadDurationMs: Long?,
+    val lastGenerationStartedAtMs: Long?,
+    val lastFirstChunkLatencyMs: Long?,
+    val lastGenerationDurationMs: Long?,
+    val lastOutputChars: Int,
+    val lastApproxCharsPerSecond: Double,
+    val lastChunkCount: Int,
+    val lastStreamingUsed: Boolean,
+    val totalRequests: Long,
+    val totalErrors: Long,
+    val activeGeneration: Boolean,
+    val lastErrorShortMessage: String?,
+) {
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("backendStatus", backendStatus)
+            .put("modelLoaded", modelLoaded)
+            .put("speculativeDecodingRequested", speculativeDecodingRequested)
+            .put("speculativeDecodingEnabled", speculativeDecodingEnabled)
+            .put("speculativeDecodingAvailable", speculativeDecodingAvailable)
+            .put("speculativeDecodingError", speculativeDecodingError ?: JSONObject.NULL)
+            .put("lastLoadDurationMs", lastLoadDurationMs ?: JSONObject.NULL)
+            .put("lastGenerationStartedAtMs", lastGenerationStartedAtMs ?: JSONObject.NULL)
+            .put("lastFirstChunkLatencyMs", lastFirstChunkLatencyMs ?: JSONObject.NULL)
+            .put("lastGenerationDurationMs", lastGenerationDurationMs ?: JSONObject.NULL)
+            .put("lastOutputChars", lastOutputChars)
+            .put("lastApproxCharsPerSecond", String.format(Locale.US, "%.1f", lastApproxCharsPerSecond).toDouble())
+            .put("lastChunkCount", lastChunkCount)
+            .put("lastStreamingUsed", lastStreamingUsed)
+            .put("totalRequests", totalRequests)
+            .put("totalErrors", totalErrors)
+            .put("activeGeneration", activeGeneration)
+            .put("lastErrorShortMessage", lastErrorShortMessage ?: JSONObject.NULL)
+    }
+}
+
+class GenerationTimeoutException(timeoutSeconds: Int) : Exception("Generation timed out after $timeoutSeconds seconds")
+
+enum class ResponseMode(val displayName: String) {
+    CODING_CONCISE("Coding concise"),
+    BALANCED("Balanced"),
+    DETAILED("Detailed");
 
     companion object {
-        fun fromDisplayName(displayName: String): ResponseLength {
-            return entries.firstOrNull { it.displayName == displayName } ?: MEDIUM
+        fun fromDisplayName(displayName: String): ResponseMode {
+            return entries.firstOrNull { it.displayName == displayName } ?: CODING_CONCISE
+        }
+    }
+}
+
+enum class ConversationMode(val displayName: String) {
+    PERSISTENT("Persistent conversation"),
+    FRESH_PER_REQUEST("Fresh conversation per request");
+
+    companion object {
+        fun fromDisplayName(displayName: String): ConversationMode {
+            return entries.firstOrNull { it.displayName == displayName } ?: PERSISTENT
         }
     }
 }

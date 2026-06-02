@@ -32,6 +32,7 @@ class LocalHttpServer(
             session.method == Method.GET && (path == "/v1/models" || path == "/models") -> modelsResponse()
             session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse()
             session.method == Method.GET && path == "/debug/perf" -> performanceResponse()
+            session.method == Method.POST && path == "/v1/conversation/reset" -> resetConversationResponse(session)
             session.method == Method.POST && path == "/v1/chat/completions" -> chatCompletionResponse(session)
             session.method == Method.GET && path == "/v1/chat/completions" -> methodNotAllowedResponse()
             else -> jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
@@ -69,6 +70,7 @@ class LocalHttpServer(
                     .put("health", "GET /health")
                     .put("models", "GET /v1/models")
                     .put("chat", "POST /v1/chat/completions")
+                    .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
             )
             .put("note", "Use POST for /v1/chat/completions. Browser GET requests do not run inference.")
@@ -113,12 +115,36 @@ class LocalHttpServer(
                 .put("modelsEndpoint", true)
                 .put("streamingCompat", true)
                 .put("streamingIncremental", true)
+                .put("resetConversationEndpoint", "POST /v1/conversation/reset")
                 .put("performanceEndpoint", "GET /debug/perf")
         )
     }
 
     private fun performanceResponse(): Response {
-        return jsonResponse(Response.Status.OK, liteRtLmManager.performanceSnapshot())
+        return jsonResponse(Response.Status.OK, liteRtLmManager.performanceJson())
+    }
+
+    private fun resetConversationResponse(session: IHTTPSession): Response {
+        if (!isAuthorized(session)) {
+            return jsonResponse(Response.Status.UNAUTHORIZED, JSONObject().put("error", "Unauthorized"))
+        }
+        val result = runBlocking { liteRtLmManager.resetConversation() }
+        return result.fold(
+            onSuccess = {
+                jsonResponse(
+                    Response.Status.OK,
+                    JSONObject()
+                        .put("status", "ok")
+                        .put("message", "Conversation reset")
+                )
+            },
+            onFailure = { error ->
+                jsonResponse(
+                    Response.Status.BAD_REQUEST,
+                    JSONObject().put("error", error.message ?: "Conversation reset failed")
+                )
+            }
+        )
     }
 
     private fun methodNotAllowedResponse(): Response {
@@ -164,7 +190,7 @@ class LocalHttpServer(
                 JSONObject().put("error", "Missing prompt or user message content")
             )
         }
-        val promptedWithStyle = liteRtLmManager.applyResponseLengthHint(prompt)
+        val promptedWithStyle = liteRtLmManager.applyResponseModeHint(prompt)
 
         val stream = requestJson.optBoolean("stream", false)
         val nowSeconds = System.currentTimeMillis() / 1000

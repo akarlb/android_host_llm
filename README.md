@@ -189,6 +189,18 @@ Models:
 curl -i http://<PHONE_IP>:8080/v1/models
 ```
 
+Performance:
+
+```sh
+curl http://<PHONE_IP>:8080/debug/perf
+```
+
+Reset conversation:
+
+```sh
+curl -X POST http://<PHONE_IP>:8080/v1/conversation/reset
+```
+
 Prompt request:
 
 ```sh
@@ -212,6 +224,14 @@ curl -N -X POST "http://<PHONE_IP>:8080/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{"model":"local-litert-lm","messages":[{"role":"user","content":"Say hello."}],"stream":true}'
+```
+
+Concise coding streaming test:
+
+```sh
+curl -N -X POST "http://<PHONE_IP>:8080/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local-litert-lm","messages":[{"role":"user","content":"Explain this Kotlin compile error in 3 bullet points."}],"stream":true}'
 ```
 
 Browser CORS/PNA test: open a browser console and run:
@@ -250,6 +270,8 @@ If you started in localhost-only mode, call `http://127.0.0.1:8080/v1/chat/compl
 
 This build enables LiteRT-LM Multi-Token Prediction / speculative decoding before GPU engine initialization when the pinned LiteRT-LM SDK exposes the experimental API. The app does not enable speculative decoding for CPU fallback. The UI reports the current backend and whether MTP/speculative decoding is enabled.
 
+MTP/speculative decoding is requested by default for GPU loads. The **Enable GPU MTP / speculative decoding** checkbox controls the next model load; changing it requires tapping **Load Model** again. If the pinned SDK does not expose the experimental flag, the build should keep passing and the app reports MTP as unavailable.
+
 For `stream=true`, the server now uses LiteRT-LM `sendMessageAsync()` and returns OpenAI-compatible Server-Sent Events incrementally as model chunks arrive. Streaming does not change the final non-streaming JSON shape; requests without `stream` or with `stream:false` still return `object: chat.completion`, `choices[0].message.content`, and the simple `response` field.
 
 Test real streaming from another device on the same Wi-Fi/LAN:
@@ -266,11 +288,59 @@ Check performance metrics:
 curl http://<PHONE_IP>:8080/debug/perf
 ```
 
-The `/debug/perf` response includes backend status, model-loaded status, speculative-decoding status, last load duration, first-chunk latency, generation duration, output character count, approximate characters per second, and whether the last request used streaming. It does not expose prompt text, Hugging Face tokens, or API keys.
+The `/debug/perf` response includes backend status, model-loaded status, speculative-decoding requested/enabled/available status, last load duration, last generation start time, first-chunk latency, generation duration, output character count, approximate characters per second, chunk count, streaming/non-streaming mode, request/error totals, active-generation status, and the last short error message. It does not expose prompt text, Hugging Face tokens, or API keys.
+
+Reset the persistent conversation without reloading the model:
+
+```sh
+curl -X POST http://<PHONE_IP>:8080/v1/conversation/reset
+```
+
+Successful reset response:
+
+```json
+{"status":"ok","message":"Conversation reset"}
+```
+
+Resetting conversation can improve stability and speed during long coding sessions, but it clears conversational context. Reset is rejected while a generation is active.
+
+Conversation modes:
+
+- **Persistent conversation** keeps current behavior and retains chat memory inside the loaded LiteRT-LM conversation.
+- **Fresh conversation per request** creates and closes a temporary LiteRT-LM conversation for each request without reloading the model. This may improve isolation and stability for coding clients, but it loses chat memory between requests.
+
+For Page Assist and coding clients, test both conversation modes and compare `/debug/perf` output.
+
+Response modes:
+
+- **Coding concise** is the default. It prepends a short coding-focused instruction that asks for direct, actionable answers and exact patches or commands when code is needed.
+- **Balanced** prepends a simple direct-answer instruction.
+- **Detailed** asks for thorough answers when useful.
+
+The app intentionally does not rely on unsupported max-token settings; shorter responses are encouraged through lightweight prompt instructions.
+
+Timeout and cancellation:
+
+- Generation timeout defaults to 180 seconds and can be set from 10 to 600 seconds.
+- Non-streaming and streaming generation paths are wrapped with the timeout.
+- Timeout errors are reported as `Generation timed out after X seconds`.
+- **Cancel Current Generation** requests coroutine cancellation for the active generation. Native LiteRT-LM calls may only observe cancellation at safe suspension points, so timeout remains the main stability guard.
 
 Performance notes:
 
 - Streaming improves perceived speed because clients can display partial output as soon as chunks arrive instead of waiting for the full answer.
 - MTP/speculative decoding may improve raw decode speed on GPU-capable devices.
-- Phone thermal throttling can reduce speed during long sessions, especially while plugged in or under sustained GPU load.
-- Shorter responses are faster because the model generates fewer tokens. The app includes a **Response length** selector: **Short** adds a concise-answer instruction, **Medium** asks for a clear direct answer, and **Long** sends no concision instruction.
+- Shorter responses are faster because the model generates fewer tokens.
+- Long local LLM sessions heat the phone.
+- Thermal throttling may reduce speed.
+- Keep the phone plugged in for long coding sessions.
+- Use shorter responses for faster iteration.
+- Reset conversation occasionally.
+- Avoid running multiple clients at once.
+
+Coding-client recommendations:
+
+- Use `stream=true`.
+- Use **Coding concise** response mode.
+- Reset conversation when responses slow down or become unstable.
+- Use `/debug/perf` to compare MTP on/off and persistent versus fresh-per-request conversation mode.
