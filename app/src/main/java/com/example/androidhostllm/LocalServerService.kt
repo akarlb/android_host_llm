@@ -49,6 +49,7 @@ class LocalServerService : Service() {
         ServerRegistry.server?.stopServer()
         val server = LocalHttpServer(
             liteRtLmManager = ServerRegistry.liteRtLmManager,
+            appPreferences = preferences,
             bindHost = bindHost,
             port = port,
             requireApiKey = requireApiKey,

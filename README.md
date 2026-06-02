@@ -195,6 +195,34 @@ Performance:
 curl http://<PHONE_IP>:8080/debug/perf
 ```
 
+Performance history:
+
+```sh
+curl http://<PHONE_IP>:8080/debug/perf/history
+```
+
+Get runtime config:
+
+```sh
+curl http://<PHONE_IP>:8080/debug/config
+```
+
+Set concise fresh-per-request mode:
+
+```sh
+curl -X POST http://<PHONE_IP>:8080/debug/config \
+  -H "Content-Type: application/json" \
+  -d '{"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE","generationTimeoutSeconds":180}'
+```
+
+Run benchmark:
+
+```sh
+curl -X POST http://<PHONE_IP>:8080/debug/benchmark \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Explain Kotlin unresolved reference in 3 bullets.","iterations":3,"stream":true,"resetBeforeEach":true,"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE"}'
+```
+
 Reset conversation:
 
 ```sh
@@ -289,6 +317,32 @@ curl http://<PHONE_IP>:8080/debug/perf
 ```
 
 The `/debug/perf` response includes backend status, model-loaded status, speculative-decoding requested/enabled/available status, last load duration, last generation start time, first-chunk latency, generation duration, output character count, approximate characters per second, chunk count, streaming/non-streaming mode, request/error totals, active-generation status, and the last short error message. It does not expose prompt text, Hugging Face tokens, or API keys.
+
+The `/debug/perf/history` endpoint returns the last 20 generation metric snapshots. It stores only timing/count/status data, not prompts or responses.
+
+Remote config:
+
+```sh
+curl http://<PHONE_IP>:8080/debug/config
+```
+
+```sh
+curl -X POST http://<PHONE_IP>:8080/debug/config \
+  -H "Content-Type: application/json" \
+  -d '{"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE","generationTimeoutSeconds":180}'
+```
+
+`POST /debug/config` accepts optional `conversationMode`, `responseMode`, `generationTimeoutSeconds`, and `speculativeDecodingRequested` fields. Conversation and response mode changes apply immediately and are persisted. MTP setting changes are persisted but require a model reload to affect engine initialization.
+
+Benchmark:
+
+```sh
+curl -X POST http://<PHONE_IP>:8080/debug/benchmark \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Explain Kotlin unresolved reference in 3 bullets.","iterations":3,"stream":true,"resetBeforeEach":true,"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE"}'
+```
+
+`POST /debug/benchmark` runs up to 5 sequential iterations using the existing generation path. For `stream:true`, chunks are consumed internally and the endpoint returns a normal JSON summary with per-iteration metrics and averages. Optional benchmark conversation/response modes are temporary for the benchmark request and do not overwrite saved config.
 
 Reset the persistent conversation without reloading the model:
 

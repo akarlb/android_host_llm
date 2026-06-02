@@ -11,6 +11,7 @@ import org.json.JSONObject
 
 class LocalHttpServer(
     private val liteRtLmManager: LiteRtLmManager,
+    private val appPreferences: AppPreferences,
     private val bindHost: String,
     port: Int,
     private val requireApiKey: Boolean,
@@ -32,6 +33,10 @@ class LocalHttpServer(
             session.method == Method.GET && (path == "/v1/models" || path == "/models") -> modelsResponse()
             session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse()
             session.method == Method.GET && path == "/debug/perf" -> performanceResponse()
+            session.method == Method.GET && path == "/debug/perf/history" -> performanceHistoryResponse()
+            session.method == Method.GET && path == "/debug/config" -> configResponse()
+            session.method == Method.POST && path == "/debug/config" -> updateConfigResponse(session)
+            session.method == Method.POST && path == "/debug/benchmark" -> benchmarkResponse(session)
             session.method == Method.POST && path == "/v1/conversation/reset" -> resetConversationResponse(session)
             session.method == Method.POST && path == "/v1/chat/completions" -> chatCompletionResponse(session)
             session.method == Method.GET && path == "/v1/chat/completions" -> methodNotAllowedResponse()
@@ -72,6 +77,9 @@ class LocalHttpServer(
                     .put("chat", "POST /v1/chat/completions")
                     .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
+                    .put("performanceHistory", "GET /debug/perf/history")
+                    .put("config", "GET/POST /debug/config")
+                    .put("benchmark", "POST /debug/benchmark")
             )
             .put("note", "Use POST for /v1/chat/completions. Browser GET requests do not run inference.")
     }
@@ -117,11 +125,135 @@ class LocalHttpServer(
                 .put("streamingIncremental", true)
                 .put("resetConversationEndpoint", "POST /v1/conversation/reset")
                 .put("performanceEndpoint", "GET /debug/perf")
+                .put("performanceHistoryEndpoint", "GET /debug/perf/history")
+                .put("configEndpoint", "GET/POST /debug/config")
+                .put("benchmarkEndpoint", "POST /debug/benchmark")
         )
     }
 
     private fun performanceResponse(): Response {
         return jsonResponse(Response.Status.OK, liteRtLmManager.performanceJson())
+    }
+
+    private fun performanceHistoryResponse(): Response {
+        return jsonResponse(Response.Status.OK, liteRtLmManager.performanceHistoryJson())
+    }
+
+    private fun configResponse(): Response {
+        return jsonResponse(Response.Status.OK, configJson())
+    }
+
+    private fun updateConfigResponse(session: IHTTPSession): Response {
+        val requestJson = readJsonRequest(session) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Malformed JSON or missing JSON body")
+        )
+
+        val warnings = JSONArray()
+
+        if (requestJson.has("conversationMode") && !requestJson.isNull("conversationMode")) {
+            val value = parseConversationMode(requestJson.optString("conversationMode")) ?: return invalidConfigValue("conversationMode")
+            liteRtLmManager.setConversationMode(value)
+            appPreferences.saveConversationMode(value)
+        }
+
+        if (requestJson.has("responseMode") && !requestJson.isNull("responseMode")) {
+            val value = parseResponseMode(requestJson.optString("responseMode")) ?: return invalidConfigValue("responseMode")
+            liteRtLmManager.setResponseMode(value)
+            appPreferences.saveResponseMode(value)
+        }
+
+        if (requestJson.has("generationTimeoutSeconds") && !requestJson.isNull("generationTimeoutSeconds")) {
+            val timeoutSeconds = requestJson.optInt("generationTimeoutSeconds", -1)
+            if (timeoutSeconds !in 10..600) {
+                return jsonResponse(
+                    Response.Status.BAD_REQUEST,
+                    JSONObject().put("error", "generationTimeoutSeconds must be between 10 and 600")
+                )
+            }
+            liteRtLmManager.setGenerationTimeoutSeconds(timeoutSeconds)
+            appPreferences.saveGenerationTimeoutSeconds(timeoutSeconds)
+        }
+
+        if (requestJson.has("speculativeDecodingRequested") && !requestJson.isNull("speculativeDecodingRequested")) {
+            val value = requestJson.optBoolean("speculativeDecodingRequested")
+            liteRtLmManager.setSpeculativeDecodingRequested(value)
+            appPreferences.saveSpeculativeDecodingRequested(value)
+            warnings.put("MTP setting changed; reload model for this to take effect.")
+        }
+
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("config", configJson())
+                .put("warnings", warnings)
+        )
+    }
+
+    private fun benchmarkResponse(session: IHTTPSession): Response {
+        if (!liteRtLmManager.isLoaded()) {
+            return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, JSONObject().put("error", "Model is not loaded"))
+        }
+        val requestJson = readJsonRequest(session) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Malformed JSON or missing JSON body")
+        )
+        val prompt = requestJson.optString("prompt").takeIf { it.isNotBlank() } ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "prompt is required")
+        )
+        val iterations = requestJson.optInt("iterations", 1).coerceIn(1, 5)
+        val stream = requestJson.optBoolean("stream", true)
+        val resetBeforeEach = requestJson.optBoolean("resetBeforeEach", false)
+        val conversationModeOverride = if (requestJson.has("conversationMode") && !requestJson.isNull("conversationMode")) {
+            parseConversationMode(requestJson.optString("conversationMode")) ?: return invalidConfigValue("conversationMode")
+        } else null
+        val responseModeOverride = if (requestJson.has("responseMode") && !requestJson.isNull("responseMode")) {
+            parseResponseMode(requestJson.optString("responseMode")) ?: return invalidConfigValue("responseMode")
+        } else null
+
+        val results = JSONArray()
+        repeat(iterations) { index ->
+            val effectiveResponseMode = responseModeOverride ?: liteRtLmManager.responseMode()
+            val effectiveConversationMode = conversationModeOverride ?: liteRtLmManager.conversationMode()
+            if (resetBeforeEach) {
+                val resetResult = runBlocking { liteRtLmManager.resetConversation() }
+                if (resetResult.isFailure) {
+                    results.put(benchmarkErrorJson(index + 1, effectiveConversationMode, effectiveResponseMode, resetResult.exceptionOrNull()))
+                    return@repeat
+                }
+            }
+
+            val prompted = liteRtLmManager.applyResponseModeHint(prompt, effectiveResponseMode)
+            val result = runBlocking {
+                if (stream) {
+                    liteRtLmManager.generateStreaming(
+                        prompt = prompted,
+                        onChunk = { },
+                        conversationModeOverride = effectiveConversationMode,
+                        responseModeOverride = effectiveResponseMode,
+                    )
+                } else {
+                    liteRtLmManager.generate(
+                        prompt = prompted,
+                        conversationModeOverride = effectiveConversationMode,
+                        responseModeOverride = effectiveResponseMode,
+                    )
+                }
+            }
+            val snapshot = liteRtLmManager.performanceSnapshot()
+            results.put(benchmarkResultJson(index + 1, snapshot, effectiveConversationMode, effectiveResponseMode, result.exceptionOrNull()))
+        }
+
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("iterations", iterations)
+                .put("results", results)
+                .put("average", benchmarkAverageJson(results))
+        )
     }
 
     private fun resetConversationResponse(session: IHTTPSession): Response {
@@ -285,6 +417,118 @@ class LocalHttpServer(
         }
     }
 
+    private fun configJson(): JSONObject {
+        return JSONObject()
+            .put("modelLoaded", liteRtLmManager.isLoaded())
+            .put("backendStatus", liteRtLmManager.backendStatus())
+            .put("speculativeDecodingRequested", liteRtLmManager.speculativeDecodingRequested())
+            .put("speculativeDecodingEnabled", liteRtLmManager.speculativeDecodingEnabled())
+            .put("conversationMode", liteRtLmManager.conversationMode().name)
+            .put("responseMode", liteRtLmManager.responseMode().name)
+            .put("generationTimeoutSeconds", liteRtLmManager.generationTimeoutSeconds())
+            .put("serverMode", serverMode)
+            .put("streamingSupported", true)
+            .put("modelId", modelId)
+    }
+
+    private fun benchmarkResultJson(
+        iteration: Int,
+        snapshot: PerformanceSnapshot,
+        conversationMode: ConversationMode,
+        responseMode: ResponseMode,
+        error: Throwable?,
+    ): JSONObject {
+        return JSONObject()
+            .put("iteration", iteration)
+            .put("firstChunkLatencyMs", snapshot.lastFirstChunkLatencyMs ?: JSONObject.NULL)
+            .put("generationDurationMs", snapshot.lastGenerationDurationMs ?: JSONObject.NULL)
+            .put("outputChars", snapshot.lastOutputChars)
+            .put("approxCharsPerSecond", formatDouble(snapshot.lastApproxCharsPerSecond))
+            .put("chunkCount", snapshot.lastChunkCount)
+            .put("backendStatus", snapshot.backendStatus)
+            .put("speculativeDecodingEnabled", snapshot.speculativeDecodingEnabled)
+            .put("conversationMode", conversationMode.name)
+            .put("responseMode", responseMode.name)
+            .put("error", error?.message ?: JSONObject.NULL)
+    }
+
+    private fun benchmarkErrorJson(
+        iteration: Int,
+        conversationMode: ConversationMode,
+        responseMode: ResponseMode,
+        error: Throwable?,
+    ): JSONObject {
+        return JSONObject()
+            .put("iteration", iteration)
+            .put("firstChunkLatencyMs", JSONObject.NULL)
+            .put("generationDurationMs", JSONObject.NULL)
+            .put("outputChars", 0)
+            .put("approxCharsPerSecond", 0.0)
+            .put("chunkCount", 0)
+            .put("backendStatus", liteRtLmManager.backendStatus())
+            .put("speculativeDecodingEnabled", liteRtLmManager.speculativeDecodingEnabled())
+            .put("conversationMode", conversationMode.name)
+            .put("responseMode", responseMode.name)
+            .put("error", error?.message ?: "Benchmark setup failed")
+    }
+
+    private fun benchmarkAverageJson(results: JSONArray): JSONObject {
+        var firstChunkTotal = 0.0
+        var firstChunkCount = 0
+        var durationTotal = 0.0
+        var durationCount = 0
+        var outputCharsTotal = 0.0
+        var outputCharsCount = 0
+        var charsPerSecondTotal = 0.0
+        var charsPerSecondCount = 0
+        var chunkCountTotal = 0.0
+        var chunkCountCount = 0
+
+        for (index in 0 until results.length()) {
+            val result = results.optJSONObject(index) ?: continue
+            if (!result.isNull("firstChunkLatencyMs")) {
+                firstChunkTotal += result.optDouble("firstChunkLatencyMs")
+                firstChunkCount += 1
+            }
+            if (!result.isNull("generationDurationMs")) {
+                durationTotal += result.optDouble("generationDurationMs")
+                durationCount += 1
+            }
+            if (result.isNull("error")) {
+                outputCharsTotal += result.optDouble("outputChars")
+                outputCharsCount += 1
+                charsPerSecondTotal += result.optDouble("approxCharsPerSecond")
+                charsPerSecondCount += 1
+                chunkCountTotal += result.optDouble("chunkCount")
+                chunkCountCount += 1
+            }
+        }
+
+        return JSONObject()
+            .put("firstChunkLatencyMs", averageOrNull(firstChunkTotal, firstChunkCount))
+            .put("generationDurationMs", averageOrNull(durationTotal, durationCount))
+            .put("outputChars", averageOrNull(outputCharsTotal, outputCharsCount))
+            .put("approxCharsPerSecond", averageOrNull(charsPerSecondTotal, charsPerSecondCount))
+            .put("chunkCount", averageOrNull(chunkCountTotal, chunkCountCount))
+    }
+
+    private fun averageOrNull(total: Double, count: Int): Any {
+        return if (count > 0) formatDouble(total / count) else JSONObject.NULL
+    }
+
+    private fun formatDouble(value: Double): Double = String.format(java.util.Locale.US, "%.1f", value).toDouble()
+
+    private fun parseConversationMode(value: String): ConversationMode? = runCatching { ConversationMode.valueOf(value) }.getOrNull()
+
+    private fun parseResponseMode(value: String): ResponseMode? = runCatching { ResponseMode.valueOf(value) }.getOrNull()
+
+    private fun invalidConfigValue(field: String): Response {
+        return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Invalid $field value")
+        )
+    }
+
     private fun chatCompletionChunkJson(
         completionId: String,
         created: Long,
@@ -345,6 +589,14 @@ class LocalHttpServer(
         val files = mutableMapOf<String, String>()
         session.parseBody(files)
         return files["postData"].orEmpty()
+    }
+
+    private fun readJsonRequest(session: IHTTPSession): JSONObject? {
+        return try {
+            JSONObject(readBody(session))
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun extractPrompt(json: JSONObject): String? {

@@ -316,9 +316,28 @@ class MainActivity : Activity() {
             appendLine("Response mode: ${liteRtLmManager.responseMode().displayName}")
             appendLine("Timeout: ${liteRtLmManager.generationTimeoutSeconds()}s")
         }
+        syncGenerationControls()
         if (::performanceText.isInitialized) performanceText.text = liteRtLmManager.performanceSummary()
         apiKeyText.text = "Local server API key (for LAN / Wi-Fi): ${serverAuth.getOrCreateApiKey()}"
         urlsText.text = buildUrlText(currentPort())
+    }
+
+    private fun syncGenerationControls() {
+        if (::conversationModeSpinner.isInitialized) {
+            val index = ConversationMode.entries.indexOf(liteRtLmManager.conversationMode())
+            if (index >= 0 && conversationModeSpinner.selectedItemPosition != index) conversationModeSpinner.setSelection(index)
+        }
+        if (::responseModeSpinner.isInitialized) {
+            val index = ResponseMode.entries.indexOf(liteRtLmManager.responseMode())
+            if (index >= 0 && responseModeSpinner.selectedItemPosition != index) responseModeSpinner.setSelection(index)
+        }
+        if (::mtpCheckBox.isInitialized && mtpCheckBox.isChecked != liteRtLmManager.speculativeDecodingRequested()) {
+            mtpCheckBox.isChecked = liteRtLmManager.speculativeDecodingRequested()
+        }
+        if (::timeoutField.isInitialized) {
+            val timeoutText = liteRtLmManager.generationTimeoutSeconds().toString()
+            if (timeoutField.text.toString() != timeoutText) timeoutField.setText(timeoutText)
+        }
     }
 
     private fun confirmAndDownload(forceReplace: Boolean) {
