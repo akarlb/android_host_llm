@@ -50,6 +50,7 @@ class LocalServerService : Service() {
         val server = LocalHttpServer(
             liteRtLmManager = ServerRegistry.liteRtLmManager,
             appPreferences = preferences,
+            authRepository = AuthRepository(applicationContext),
             bindHost = bindHost,
             port = port,
             requireApiKey = requireApiKey,
