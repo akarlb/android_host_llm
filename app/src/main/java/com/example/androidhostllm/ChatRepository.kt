@@ -138,6 +138,16 @@ class ChatRepository(context: Context) {
         )
     }
 
+    @Synchronized
+    fun totalChatCount(): Int {
+        database.readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM chats WHERE archived = 0",
+            emptyArray<String>()
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
     private fun android.database.Cursor.toChatRecord(): ChatRecord {
         return ChatRecord(
             id = getString(0),

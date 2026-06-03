@@ -102,6 +102,36 @@ class AuthRepository(context: Context) {
 
     fun requireAdmin(token: String?): AuthUser? = currentUser(token)?.takeIf { it.role == UserRole.ADMIN }
 
+    @Synchronized
+    fun listAdminUserOverviews(): List<AdminUserOverview> {
+        database.readableDatabase.rawQuery(
+            """
+            SELECT u.id, u.username, u.role, u.created_at_ms,
+                   COUNT(DISTINCT c.id) AS chat_count,
+                   COUNT(DISTINCT f.id) AS file_count
+            FROM users u
+            LEFT JOIN chats c ON c.user_id = u.id AND c.archived = 0
+            LEFT JOIN uploaded_files f ON f.user_id = u.id
+            GROUP BY u.id
+            ORDER BY u.created_at_ms ASC
+            """.trimIndent(),
+            emptyArray<String>()
+        ).use { cursor ->
+            val users = mutableListOf<AdminUserOverview>()
+            while (cursor.moveToNext()) {
+                users += AdminUserOverview(
+                    id = cursor.getString(0),
+                    username = cursor.getString(1),
+                    role = UserRole.valueOf(cursor.getString(2)),
+                    createdAtMs = cursor.getLong(3),
+                    chatCount = cursor.getInt(4),
+                    fileCount = cursor.getInt(5),
+                )
+            }
+            return users
+        }
+    }
+
     private fun createSession(user: AuthUser, now: Long): AuthSession {
         val token = generateSessionToken()
         val session = AuthSession(

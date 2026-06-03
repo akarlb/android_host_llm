@@ -12,6 +12,15 @@ data class UploadedFileRecord(
     val chunkCount: Int,
 )
 
+data class AdminFileOverview(
+    val id: String,
+    val username: String,
+    val filename: String,
+    val sizeBytes: Long,
+    val chunkCount: Int,
+    val createdAtMs: Long,
+)
+
 data class FileChunkRecord(
     val id: String,
     val fileId: String,

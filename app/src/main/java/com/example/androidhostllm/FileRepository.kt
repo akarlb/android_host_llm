@@ -116,6 +116,41 @@ class FileRepository(context: Context) {
     }
 
     @Synchronized
+    fun listAdminFileOverviews(): List<AdminFileOverview> {
+        database.readableDatabase.rawQuery(
+            """
+            SELECT f.id, u.username, f.original_filename, f.size_bytes, COUNT(c.id) AS chunk_count, f.created_at_ms
+            FROM uploaded_files f
+            JOIN users u ON u.id = f.user_id
+            LEFT JOIN file_chunks c ON c.file_id = f.id
+            GROUP BY f.id
+            ORDER BY f.created_at_ms DESC
+            """.trimIndent(),
+            emptyArray<String>()
+        ).use { cursor ->
+            val files = mutableListOf<AdminFileOverview>()
+            while (cursor.moveToNext()) {
+                files += AdminFileOverview(
+                    id = cursor.getString(0),
+                    username = cursor.getString(1),
+                    filename = cursor.getString(2),
+                    sizeBytes = cursor.getLong(3),
+                    chunkCount = cursor.getInt(4),
+                    createdAtMs = cursor.getLong(5),
+                )
+            }
+            return files
+        }
+    }
+
+    @Synchronized
+    fun totalFileCount(): Int {
+        database.readableDatabase.rawQuery("SELECT COUNT(*) FROM uploaded_files", emptyArray<String>()).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
+    @Synchronized
     fun getFile(userId: String, fileId: String): UploadedFileRecord? {
         database.readableDatabase.rawQuery(
             """
