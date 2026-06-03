@@ -12,6 +12,7 @@ import org.json.JSONObject
 class LocalHttpServer(
     private val liteRtLmManager: LiteRtLmManager,
     private val appPreferences: AppPreferences,
+    private val authRepository: AuthRepository,
     private val bindHost: String,
     port: Int,
     private val requireApiKey: Boolean,
@@ -31,6 +32,10 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/v1" -> routesResponse(session)
             session.method == Method.GET && path == "/health" -> healthResponse()
             session.method == Method.GET && (path == "/v1/models" || path == "/models") -> modelsResponse()
+            session.method == Method.POST && path == "/auth/register" -> registerResponse(session)
+            session.method == Method.POST && path == "/auth/login" -> loginResponse(session)
+            session.method == Method.POST && path == "/auth/logout" -> logoutResponse(session)
+            session.method == Method.GET && path == "/auth/session" -> sessionResponse(session)
             session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse()
             session.method == Method.GET && path == "/debug/perf" -> performanceResponse()
             session.method == Method.GET && path == "/debug/perf/history" -> performanceHistoryResponse()
@@ -75,6 +80,10 @@ class LocalHttpServer(
                     .put("health", "GET /health")
                     .put("models", "GET /v1/models")
                     .put("chat", "POST /v1/chat/completions")
+                    .put("register", "POST /auth/register")
+                    .put("login", "POST /auth/login")
+                    .put("logout", "POST /auth/logout")
+                    .put("session", "GET /auth/session")
                     .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
                     .put("performanceHistory", "GET /debug/perf/history")
@@ -121,6 +130,10 @@ class LocalHttpServer(
                 .put("cors", true)
                 .put("privateNetworkAccess", true)
                 .put("modelsEndpoint", true)
+                .put("authRegisterEndpoint", "POST /auth/register")
+                .put("authLoginEndpoint", "POST /auth/login")
+                .put("authLogoutEndpoint", "POST /auth/logout")
+                .put("authSessionEndpoint", "GET /auth/session")
                 .put("streamingCompat", true)
                 .put("streamingIncremental", true)
                 .put("resetConversationEndpoint", "POST /v1/conversation/reset")
@@ -137,6 +150,80 @@ class LocalHttpServer(
 
     private fun performanceHistoryResponse(): Response {
         return jsonResponse(Response.Status.OK, liteRtLmManager.performanceHistoryJson())
+    }
+
+    private fun registerResponse(session: IHTTPSession): Response {
+        val requestJson = readJsonRequest(session) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Malformed JSON or missing JSON body")
+        )
+        return when (val result = authRepository.register(requestJson.optString("username"), requestJson.optString("password"))) {
+            is AuthResult.Success -> authSuccessResponse(result.session)
+            AuthResult.InvalidFields -> jsonResponse(
+                Response.Status.BAD_REQUEST,
+                JSONObject().put("error", "username and password are required")
+            )
+            AuthResult.DuplicateUsername -> jsonResponse(
+                Response.Status.CONFLICT,
+                JSONObject().put("error", "username already exists")
+            )
+            AuthResult.InvalidCredentials -> jsonResponse(
+                Response.Status.UNAUTHORIZED,
+                JSONObject().put("error", "Invalid credentials")
+            )
+        }
+    }
+
+    private fun loginResponse(session: IHTTPSession): Response {
+        val requestJson = readJsonRequest(session) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Malformed JSON or missing JSON body")
+        )
+        return when (val result = authRepository.login(requestJson.optString("username"), requestJson.optString("password"))) {
+            is AuthResult.Success -> authSuccessResponse(result.session)
+            AuthResult.InvalidFields -> jsonResponse(
+                Response.Status.BAD_REQUEST,
+                JSONObject().put("error", "username and password are required")
+            )
+            AuthResult.DuplicateUsername,
+            AuthResult.InvalidCredentials -> jsonResponse(
+                Response.Status.UNAUTHORIZED,
+                JSONObject().put("error", "Invalid credentials")
+            )
+        }
+    }
+
+    private fun logoutResponse(session: IHTTPSession): Response {
+        val token = sessionTokenFromRequest(session)
+        if (authRepository.requireUser(token) == null) {
+            return jsonResponse(Response.Status.UNAUTHORIZED, JSONObject().put("error", "Unauthorized"))
+        }
+        if (token != null) authRepository.logout(token)
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("message", "Logged out")
+        )
+    }
+
+    private fun sessionResponse(session: IHTTPSession): Response {
+        val user = authRepository.currentUser(sessionTokenFromRequest(session))
+        if (user == null) {
+            return jsonResponse(
+                Response.Status.OK,
+                JSONObject()
+                    .put("status", "unauthenticated")
+                    .put("authenticated", false)
+            )
+        }
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("authenticated", true)
+                .put("user", userJson(user))
+        )
     }
 
     private fun configResponse(): Response {
@@ -600,6 +687,40 @@ class LocalHttpServer(
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun authSuccessResponse(authSession: AuthSession): Response {
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("user", userJson(authSession.user))
+                .put("token", authSession.token)
+        ).apply {
+            addHeader("Set-Cookie", "session=${authSession.token}; Path=/; HttpOnly; SameSite=Lax")
+        }
+    }
+
+    private fun userJson(user: AuthUser): JSONObject {
+        return JSONObject()
+            .put("id", user.id)
+            .put("username", user.username)
+            .put("role", user.role.name)
+    }
+
+    private fun sessionTokenFromRequest(session: IHTTPSession): String? {
+        val headers = session.headers
+        val authorization = headers["authorization"] ?: headers["Authorization"]
+        val bearer = authorization?.removePrefix("Bearer ")?.takeIf { it != authorization }?.trim()
+        if (!bearer.isNullOrBlank()) return bearer
+
+        val cookieHeader = headers["cookie"] ?: headers["Cookie"]
+        return cookieHeader
+            ?.split(';')
+            ?.map { it.trim() }
+            ?.firstOrNull { it.startsWith("session=") }
+            ?.substringAfter('=')
+            ?.takeIf { it.isNotBlank() }
     }
 
     private fun extractPrompt(json: JSONObject): String? {

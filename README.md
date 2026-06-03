@@ -2,7 +2,7 @@
 
 This repository contains a minimal Android/Kotlin app that loads a local Google LiteRT-LM `.litertlm` model and serves a small JSON HTTP API from the phone. The MVP is designed for practical on-device testing: install the APK, download a compatible LiteRT Community model inside the app, load it, then expose the model over either localhost or the phone's Wi-Fi/LAN address.
 
-It is intentionally not a polished chat product. It has no accounts, no billing, no Firebase/cloud service, and only one active model is managed at a time.
+It is intentionally not a polished chat product. It has no billing, no Firebase/cloud service, and only one active model is managed at a time.
 
 ## Build the APK from GitHub Actions
 
@@ -162,6 +162,29 @@ Health responses return only basic status such as:
 ```
 
 If API-key enforcement is re-enabled in a future build, generation requests can authenticate with either `Authorization: Bearer <LOCAL_SERVER_KEY>` or `X-API-Key: <LOCAL_SERVER_KEY>`.
+
+## Local auth MVP
+
+The server includes a local-only auth foundation for the future phone-hosted web app. It stores users and sessions in app-private SQLite tables, hashes passwords with per-user PBKDF2 salts, and stores only SHA-256 session-token hashes. Raw session tokens are returned only by register/login responses.
+
+Auth routes:
+
+- `POST /auth/register` with `{"username":"alice","password":"password123"}`
+- `POST /auth/login`
+- `POST /auth/logout`
+- `GET /auth/session`
+
+The first registered local user is assigned `ADMIN`; later users are assigned `USER`. Username uniqueness is case-insensitive after trimming. Authenticated app routes should use `Authorization: Bearer <SESSION_TOKEN>`. An HTTP-only `session` cookie is also set on successful register/login for browser clients.
+
+This auth layer is not applied to the OpenAI-compatible model routes during the MVP. `/health`, `/v1/models`, `/v1/chat/completions`, `/coding/v1`, `/conversation/v1`, and debug/model-server routes keep their existing behavior.
+
+To smoke-test the auth foundation against a running phone server:
+
+```sh
+BASE_URL=http://<PHONE_IP>:8080 ./test_auth_foundation.sh
+```
+
+The script prints results and writes Markdown to `results_auth_foundation.md`. Set `RUN_CHAT=0` if the model is not loaded and you only want auth plus lightweight endpoint checks.
 
 ## Page Assist / OpenAI-compatible clients
 

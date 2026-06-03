@@ -1,0 +1,183 @@
+package com.example.androidhostllm
+
+import android.content.ContentValues
+import android.content.Context
+import android.util.Base64
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Locale
+import java.util.UUID
+
+class AuthRepository(context: Context) {
+    private val database = AppDatabase(context.applicationContext)
+    private val secureRandom = SecureRandom()
+
+    @Synchronized
+    fun register(username: String?, password: String?): AuthResult {
+        val cleanUsername = username?.trim().orEmpty()
+        val cleanPassword = password.orEmpty()
+        val normalized = normalizeUsername(cleanUsername)
+        if (normalized.isBlank() || cleanPassword.isBlank()) return AuthResult.InvalidFields
+        if (findUserByNormalized(normalized) != null) return AuthResult.DuplicateUsername
+
+        val now = System.currentTimeMillis()
+        val role = if (countUsers() == 0) UserRole.ADMIN else UserRole.USER
+        val passwordHash = PasswordHasher.hashPassword(cleanPassword)
+        val user = AuthUser(
+            id = UUID.randomUUID().toString(),
+            username = cleanUsername,
+            role = role,
+        )
+        database.writableDatabase.insertOrThrow(
+            "users",
+            null,
+            ContentValues().apply {
+                put("id", user.id)
+                put("username", user.username)
+                put("username_normalized", normalized)
+                put("password_hash", passwordHash.hash)
+                put("password_salt", passwordHash.salt)
+                put("role", role.name)
+                put("created_at_ms", now)
+                put("updated_at_ms", now)
+            }
+        )
+        return AuthResult.Success(createSession(user, now))
+    }
+
+    @Synchronized
+    fun login(username: String?, password: String?): AuthResult {
+        val normalized = normalizeUsername(username?.trim().orEmpty())
+        val cleanPassword = password.orEmpty()
+        if (normalized.isBlank() || cleanPassword.isBlank()) return AuthResult.InvalidFields
+
+        val row = findUserAuthRow(normalized) ?: return AuthResult.InvalidCredentials
+        if (!PasswordHasher.verifyPassword(cleanPassword, row.passwordHash, row.passwordSalt)) {
+            return AuthResult.InvalidCredentials
+        }
+        return AuthResult.Success(createSession(row.user, System.currentTimeMillis()))
+    }
+
+    @Synchronized
+    fun logout(token: String): Boolean {
+        val tokenHash = hashSessionToken(token)
+        return database.writableDatabase.delete("sessions", "token_hash = ?", arrayOf(tokenHash)) > 0
+    }
+
+    @Synchronized
+    fun currentUser(token: String?): AuthUser? {
+        if (token.isNullOrBlank()) return null
+        val tokenHash = hashSessionToken(token)
+        val now = System.currentTimeMillis()
+        database.readableDatabase.rawQuery(
+            """
+            SELECT u.id, u.username, u.role, s.expires_at_ms
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ?
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(tokenHash)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            if (!cursor.isNull(3) && cursor.getLong(3) <= now) {
+                database.writableDatabase.delete("sessions", "token_hash = ?", arrayOf(tokenHash))
+                return null
+            }
+            database.writableDatabase.update(
+                "sessions",
+                ContentValues().apply { put("last_seen_at_ms", now) },
+                "token_hash = ?",
+                arrayOf(tokenHash)
+            )
+            return AuthUser(
+                id = cursor.getString(0),
+                username = cursor.getString(1),
+                role = UserRole.valueOf(cursor.getString(2)),
+            )
+        }
+    }
+
+    fun requireUser(token: String?): AuthUser? = currentUser(token)
+
+    fun requireAdmin(token: String?): AuthUser? = currentUser(token)?.takeIf { it.role == UserRole.ADMIN }
+
+    private fun createSession(user: AuthUser, now: Long): AuthSession {
+        val token = generateSessionToken()
+        val session = AuthSession(
+            id = UUID.randomUUID().toString(),
+            token = token,
+            user = user,
+        )
+        database.writableDatabase.insertOrThrow(
+            "sessions",
+            null,
+            ContentValues().apply {
+                put("id", session.id)
+                put("token_hash", hashSessionToken(token))
+                put("user_id", user.id)
+                put("created_at_ms", now)
+                put("last_seen_at_ms", now)
+                putNull("expires_at_ms")
+            }
+        )
+        return session
+    }
+
+    private fun findUserByNormalized(normalized: String): AuthUser? {
+        database.readableDatabase.rawQuery(
+            "SELECT id, username, role FROM users WHERE username_normalized = ? LIMIT 1",
+            arrayOf(normalized)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            return AuthUser(
+                id = cursor.getString(0),
+                username = cursor.getString(1),
+                role = UserRole.valueOf(cursor.getString(2)),
+            )
+        }
+    }
+
+    private fun findUserAuthRow(normalized: String): UserAuthRow? {
+        database.readableDatabase.rawQuery(
+            "SELECT id, username, role, password_hash, password_salt FROM users WHERE username_normalized = ? LIMIT 1",
+            arrayOf(normalized)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            return UserAuthRow(
+                user = AuthUser(
+                    id = cursor.getString(0),
+                    username = cursor.getString(1),
+                    role = UserRole.valueOf(cursor.getString(2)),
+                ),
+                passwordHash = cursor.getString(3),
+                passwordSalt = cursor.getString(4),
+            )
+        }
+    }
+
+    private fun countUsers(): Int {
+        database.readableDatabase.rawQuery("SELECT COUNT(*) FROM users", emptyArray<String>()).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
+    private fun generateSessionToken(): String {
+        val bytes = ByteArray(32)
+        secureRandom.nextBytes(bytes)
+        return Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+    }
+
+    private fun hashSessionToken(token: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(token.toByteArray(Charsets.UTF_8))
+        return Base64.encodeToString(digest, Base64.NO_WRAP)
+    }
+
+    private fun normalizeUsername(username: String): String = username.trim().lowercase(Locale.US)
+
+    private data class UserAuthRow(
+        val user: AuthUser,
+        val passwordHash: String,
+        val passwordSalt: String,
+    )
+}
