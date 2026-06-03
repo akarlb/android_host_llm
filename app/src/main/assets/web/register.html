@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Register - Phone Hosted AI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="register">
+  <main class="auth-shell">
+    <form id="register-form" class="auth-panel">
+      <h1>Phone Hosted AI</h1>
+      <p class="muted">Create a local account for chat history and files.</p>
+      <label>Username<input id="register-username" autocomplete="username" required></label>
+      <label>Password<input id="register-password" type="password" autocomplete="new-password" required></label>
+      <label>Confirm password<input id="register-confirm" type="password" autocomplete="new-password" required></label>
+      <p id="register-error" class="error" role="alert"></p>
+      <button type="submit">Register</button>
+      <a href="/login">Back to login</a>
+    </form>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
