@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat - Phone Hosted AI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="chat">
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>Phone Hosted AI</h1>
+        <p id="current-user" class="muted"></p>
+      </div>
+      <nav>
+        <a id="admin-link" href="/admin" hidden>Admin</a>
+        <button id="logout-button" type="button">Logout</button>
+      </nav>
+    </header>
+    <aside class="sidebar">
+      <button id="new-chat-button" type="button">New chat</button>
+      <div id="chat-list" class="chat-list"></div>
+      <section class="files-panel">
+        <div class="panel-heading">
+          <h2>Files</h2>
+          <button id="refresh-files-button" type="button">Refresh</button>
+        </div>
+        <input id="file-upload" type="file" accept=".md,text/markdown,text/plain">
+        <p id="files-error" class="error" role="alert"></p>
+        <div id="file-list" class="file-list"></div>
+      </section>
+    </aside>
+    <main class="chat-main">
+      <div id="messages" class="messages"></div>
+      <form id="message-form" class="composer">
+        <div id="selected-files" class="selected-files"></div>
+        <div class="composer-row">
+          <textarea id="message-input" rows="3" placeholder="Ask the local model..." required></textarea>
+          <button id="send-button" type="submit">Send</button>
+        </div>
+        <p id="chat-error" class="error" role="alert"></p>
+      </form>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

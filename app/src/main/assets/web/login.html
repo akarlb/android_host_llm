@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login - Phone Hosted AI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="login">
+  <main class="auth-shell">
+    <form id="login-form" class="auth-panel">
+      <h1>Phone Hosted AI</h1>
+      <p class="muted">Sign in to use the local chat server.</p>
+      <label>Username<input id="login-username" autocomplete="username" required></label>
+      <label>Password<input id="login-password" type="password" autocomplete="current-password" required></label>
+      <p id="login-error" class="error" role="alert"></p>
+      <button type="submit">Login</button>
+      <a href="/register">Create an account</a>
+    </form>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

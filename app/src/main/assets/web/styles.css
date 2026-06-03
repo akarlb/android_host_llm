@@ -1,0 +1,285 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --border: #d8dde5;
+  --text: #18202a;
+  --muted: #667085;
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --danger: #b42318;
+  --assistant: #eef6f4;
+  --user: #e8eefb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  padding: 10px 14px;
+}
+
+button:hover {
+  background: var(--accent-strong);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+a {
+  color: var(--accent-strong);
+  text-decoration: none;
+}
+
+.muted {
+  color: var(--muted);
+  margin: 0;
+}
+
+.error {
+  color: var(--danger);
+  min-height: 1.4em;
+  margin: 6px 0;
+}
+
+.auth-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 20px;
+}
+
+.auth-panel {
+  display: grid;
+  gap: 14px;
+  width: min(420px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 24px;
+}
+
+.auth-panel h1,
+.topbar h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: white;
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  grid-template-rows: auto 1fr;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  padding: 14px 18px;
+}
+
+.topbar nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sidebar {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  border-right: 1px solid var(--border);
+  background: #f0f3f6;
+  padding: 14px;
+  overflow: auto;
+}
+
+.chat-list,
+.file-list {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-item,
+.file-item {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 10px;
+  text-align: left;
+}
+
+.chat-item.active {
+  border-color: var(--accent);
+}
+
+.file-item {
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+}
+
+.file-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.file-delete {
+  background: #ffffff;
+  color: var(--danger);
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-heading h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.chat-main {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-width: 0;
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  padding: 20px;
+}
+
+.message {
+  max-width: min(820px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  white-space: pre-wrap;
+}
+
+.message.user {
+  align-self: flex-end;
+  background: var(--user);
+}
+
+.message.assistant {
+  align-self: flex-start;
+  background: var(--assistant);
+}
+
+.message-role {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.composer {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 14px;
+}
+
+.composer-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.selected-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.file-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #f7faf9;
+  color: var(--text);
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    max-height: 42vh;
+  }
+
+  .composer-row {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

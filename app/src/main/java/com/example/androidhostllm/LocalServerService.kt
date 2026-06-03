@@ -48,6 +48,7 @@ class LocalServerService : Service() {
 
         ServerRegistry.server?.stopServer()
         val server = LocalHttpServer(
+            appContext = applicationContext,
             liteRtLmManager = ServerRegistry.liteRtLmManager,
             appPreferences = preferences,
             authRepository = AuthRepository(applicationContext),

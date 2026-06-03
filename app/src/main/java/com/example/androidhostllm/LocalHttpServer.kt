@@ -1,7 +1,9 @@
 package com.example.androidhostllm
 
+import android.content.Context
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.runBlocking
+import java.io.ByteArrayInputStream
 import java.io.OutputStreamWriter
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
@@ -10,6 +12,7 @@ import org.json.JSONException
 import org.json.JSONObject
 
 class LocalHttpServer(
+    private val appContext: Context,
     private val liteRtLmManager: LiteRtLmManager,
     private val appPreferences: AppPreferences,
     private val authRepository: AuthRepository,
@@ -32,7 +35,13 @@ class LocalHttpServer(
         val messageChatId = chatMessageChatIdFromPath(path)
         val fileId = fileIdFromPath(path)
         return when {
-            session.method == Method.GET && path == "/" -> routesResponse(session)
+            session.method == Method.GET && path == "/" -> webAssetResponse("index.html")
+            session.method == Method.GET && path == "/login" -> webAssetResponse("login.html")
+            session.method == Method.GET && path == "/register" -> webAssetResponse("register.html")
+            session.method == Method.GET && path == "/chat" -> webAssetResponse("chat.html")
+            session.method == Method.GET && path == "/files" -> webAssetResponse("chat.html")
+            session.method == Method.GET && path == "/styles.css" -> webAssetResponse("styles.css")
+            session.method == Method.GET && path == "/app.js" -> webAssetResponse("app.js")
             session.method == Method.GET && path == "/routes" -> routesResponse(session)
             session.method == Method.GET && path == "/v1" -> routesResponse(session)
             session.method == Method.GET && path == "/health" -> healthResponse()
@@ -101,6 +110,33 @@ class LocalHttpServer(
         return jsonResponse(Response.Status.OK, routeHelpJson(session))
     }
 
+    private fun webAssetResponse(filename: String): Response {
+        val safeName = filename.substringAfterLast('/')
+        return try {
+            val bytes = appContext.assets.open("web/$safeName").use { it.readBytes() }
+            newFixedLengthResponse(
+                Response.Status.OK,
+                mimeTypeForWebAsset(safeName),
+                ByteArrayInputStream(bytes),
+                bytes.size.toLong(),
+            ).apply {
+                addCorsHeaders()
+                addHeader("Cache-Control", if (safeName.endsWith(".html")) "no-store" else "public, max-age=300")
+            }
+        } catch (_: Exception) {
+            jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
+        }
+    }
+
+    private fun mimeTypeForWebAsset(filename: String): String {
+        return when {
+            filename.endsWith(".html") -> "text/html; charset=utf-8"
+            filename.endsWith(".css") -> "text/css; charset=utf-8"
+            filename.endsWith(".js") -> "application/javascript; charset=utf-8"
+            else -> "application/octet-stream"
+        }
+    }
+
     private fun routeHelpJson(session: IHTTPSession): JSONObject {
         val host = session.headers["host"] ?: session.headers["Host"] ?: "$bindHost:${listeningPort}"
         return JSONObject()
@@ -111,6 +147,10 @@ class LocalHttpServer(
                 "routes",
                 JSONObject()
                     .put("health", "GET /health")
+                    .put("webLogin", "GET /login")
+                    .put("webRegister", "GET /register")
+                    .put("webChat", "GET /chat")
+                    .put("webFiles", "GET /files")
                     .put("models", "GET /v1/models")
                     .put("chatCompletions", "POST /v1/chat/completions")
                     .put("codingChat", "POST /coding/v1/chat/completions")
