@@ -40,6 +40,7 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/register" -> webAssetResponse("register.html")
             session.method == Method.GET && path == "/chat" -> webAssetResponse("chat.html")
             session.method == Method.GET && path == "/files" -> webAssetResponse("chat.html")
+            session.method == Method.GET && path == "/admin" -> adminPageResponse(session)
             session.method == Method.GET && path == "/styles.css" -> webAssetResponse("styles.css")
             session.method == Method.GET && path == "/app.js" -> webAssetResponse("app.js")
             session.method == Method.GET && path == "/routes" -> routesResponse(session)
@@ -50,6 +51,9 @@ class LocalHttpServer(
             session.method == Method.POST && path == "/auth/login" -> loginResponse(session)
             session.method == Method.POST && path == "/auth/logout" -> logoutResponse(session)
             session.method == Method.GET && path == "/auth/session" -> sessionResponse(session)
+            session.method == Method.GET && path == "/api/admin/status" -> adminStatusResponse(session)
+            session.method == Method.GET && path == "/api/admin/users" -> adminUsersResponse(session)
+            session.method == Method.GET && path == "/api/admin/files" -> adminFilesResponse(session)
             session.method == Method.GET && path == "/api/chats" -> listChatsResponse(session)
             session.method == Method.POST && path == "/api/chats" -> createChatResponse(session)
             session.method == Method.GET && path == "/api/files" -> listFilesResponse(session)
@@ -151,6 +155,7 @@ class LocalHttpServer(
                     .put("webRegister", "GET /register")
                     .put("webChat", "GET /chat")
                     .put("webFiles", "GET /files")
+                    .put("webAdmin", "GET /admin")
                     .put("models", "GET /v1/models")
                     .put("chatCompletions", "POST /v1/chat/completions")
                     .put("codingChat", "POST /coding/v1/chat/completions")
@@ -165,6 +170,9 @@ class LocalHttpServer(
                     .put("files", "GET /api/files")
                     .put("fileUpload", "POST /api/files/upload")
                     .put("fileDetail", "GET/DELETE /api/files/{fileId}")
+                    .put("adminStatus", "GET /api/admin/status")
+                    .put("adminUsers", "GET /api/admin/users")
+                    .put("adminFiles", "GET /api/admin/files")
                     .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
                     .put("performanceHistory", "GET /debug/perf/history")
@@ -224,6 +232,9 @@ class LocalHttpServer(
                 .put("fileUploadEndpoint", "POST /api/files/upload")
                 .put("fileDetailEndpoint", "GET /api/files/{fileId}")
                 .put("fileDeleteEndpoint", "DELETE /api/files/{fileId}")
+                .put("adminStatusEndpoint", "GET /api/admin/status")
+                .put("adminUsersEndpoint", "GET /api/admin/users")
+                .put("adminFilesEndpoint", "GET /api/admin/files")
                 .put("streamingCompat", true)
                 .put("streamingIncremental", true)
                 .put("resetConversationEndpoint", "POST /v1/conversation/reset")
@@ -314,6 +325,70 @@ class LocalHttpServer(
                 .put("authenticated", true)
                 .put("user", userJson(user))
         )
+    }
+
+    private fun adminPageResponse(session: IHTTPSession): Response {
+        val token = sessionTokenFromRequest(session)
+        val user = authRepository.requireUser(token)
+        if (user == null) return redirectResponse("/login")
+        if (user.role != UserRole.ADMIN) return webAssetResponse("admin.html")
+        return webAssetResponse("admin.html")
+    }
+
+    private fun adminStatusResponse(session: IHTTPSession): Response {
+        return withAdmin(session) {
+            val host = publicHost(session)
+            val base = "http://$host"
+            val files = fileRepository.listAdminFileOverviews()
+            val users = authRepository.listAdminUserOverviews()
+            val perf = liteRtLmManager.performanceSnapshot()
+            jsonResponse(
+                Response.Status.OK,
+                JSONObject()
+                    .put("modelLoaded", liteRtLmManager.isLoaded())
+                    .put("backendStatus", perf.backendStatus)
+                    .put("serverMode", serverMode)
+                    .put("lanIp", NetworkUtils.lanIpv4Candidates().firstOrNull() ?: "")
+                    .put("codingBaseUrl", "$base/coding/v1")
+                    .put("conversationBaseUrl", "$base/conversation/v1")
+                    .put("normalWebUrl", "$base/chat")
+                    .put("compatibilityBaseUrl", "$base/v1")
+                    .put("totalUsers", users.size)
+                    .put("totalFiles", files.size)
+                    .put("totalStorageBytes", files.sumOf { it.sizeBytes })
+                    .put("totalChats", chatRepository.totalChatCount())
+                    .put("speculativeDecodingRequested", perf.speculativeDecodingRequested)
+                    .put("speculativeDecodingEnabled", perf.speculativeDecodingEnabled)
+                    .put("speculativeDecodingAvailable", perf.speculativeDecodingAvailable)
+                    .put("speculativeDecodingError", perf.speculativeDecodingError ?: JSONObject.NULL)
+                    .put("activeGeneration", perf.activeGeneration)
+                    .put(
+                        "debug",
+                        JSONObject()
+                            .put("perf", "/debug/perf")
+                            .put("perfHistory", "/debug/perf/history")
+                            .put("config", "/debug/config")
+                            .put("routes", "/debug/routes")
+                            .put("health", "/health")
+                    )
+            )
+        }
+    }
+
+    private fun adminUsersResponse(session: IHTTPSession): Response {
+        return withAdmin(session) {
+            val users = JSONArray()
+            authRepository.listAdminUserOverviews().forEach { users.put(adminUserJson(it)) }
+            jsonResponse(Response.Status.OK, JSONObject().put("users", users))
+        }
+    }
+
+    private fun adminFilesResponse(session: IHTTPSession): Response {
+        return withAdmin(session) {
+            val files = JSONArray()
+            fileRepository.listAdminFileOverviews().forEach { files.put(adminFileJson(it)) }
+            jsonResponse(Response.Status.OK, JSONObject().put("files", files))
+        }
     }
 
     private fun listChatsResponse(session: IHTTPSession): Response {
@@ -1011,6 +1086,15 @@ class LocalHttpServer(
         return authRepository.requireUser(sessionTokenFromRequest(session))
     }
 
+    private fun withAdmin(session: IHTTPSession, block: () -> Response): Response {
+        val user = authRepository.requireUser(sessionTokenFromRequest(session))
+            ?: return unauthorizedResponse()
+        if (user.role != UserRole.ADMIN) {
+            return jsonResponse(Response.Status.FORBIDDEN, JSONObject().put("error", "Forbidden"))
+        }
+        return block()
+    }
+
     private fun unauthorizedResponse(): Response {
         return jsonResponse(Response.Status.UNAUTHORIZED, JSONObject().put("error", "Unauthorized"))
     }
@@ -1042,6 +1126,26 @@ class LocalHttpServer(
             .put("filename", file.safeFilename)
             .put("originalFilename", file.originalFilename)
             .put("mimeType", file.mimeType)
+            .put("sizeBytes", file.sizeBytes)
+            .put("chunkCount", file.chunkCount)
+            .put("createdAtMs", file.createdAtMs)
+    }
+
+    private fun adminUserJson(user: AdminUserOverview): JSONObject {
+        return JSONObject()
+            .put("id", user.id)
+            .put("username", user.username)
+            .put("role", user.role.name)
+            .put("createdAtMs", user.createdAtMs)
+            .put("chatCount", user.chatCount)
+            .put("fileCount", user.fileCount)
+    }
+
+    private fun adminFileJson(file: AdminFileOverview): JSONObject {
+        return JSONObject()
+            .put("id", file.id)
+            .put("username", file.username)
+            .put("filename", file.filename)
             .put("sizeBytes", file.sizeBytes)
             .put("chunkCount", file.chunkCount)
             .put("createdAtMs", file.createdAtMs)
@@ -1183,6 +1287,10 @@ class LocalHttpServer(
             ?.takeIf { it.isNotBlank() }
     }
 
+    private fun publicHost(session: IHTTPSession): String {
+        return session.headers["host"] ?: session.headers["Host"] ?: "$bindHost:${listeningPort}"
+    }
+
     private fun extractPrompt(json: JSONObject): String? {
         val messages = json.optJSONArray("messages")
         if (messages != null) {
@@ -1204,6 +1312,13 @@ class LocalHttpServer(
 
     private fun jsonResponse(status: Response.Status, body: JSONObject): Response {
         return newFixedLengthResponse(status, "application/json", body.toString()).apply {
+            addCorsHeaders()
+        }
+    }
+
+    private fun redirectResponse(location: String): Response {
+        return newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply {
+            addHeader("Location", location)
             addCorsHeaders()
         }
     }

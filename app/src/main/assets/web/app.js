@@ -129,6 +129,47 @@
     if (!state.currentChatId) await createChat();
   }
 
+  async function initAdmin() {
+    const current = await session();
+    if (!current.authenticated) {
+      setToken("");
+      $("admin-login").hidden = false;
+      $("admin-logout-button").hidden = true;
+      return;
+    }
+    state.user = current.user;
+    $("admin-current-user").textContent = `${current.user.username} (${current.user.role})`;
+    $("admin-logout-button").addEventListener("click", logout);
+    $("admin-refresh-button").addEventListener("click", loadAdminDashboard);
+    if (current.user.role !== "ADMIN") {
+      $("admin-denied").hidden = false;
+      return;
+    }
+    $("admin-dashboard").hidden = false;
+    await loadAdminDashboard();
+  }
+
+  async function loadAdminDashboard() {
+    showError("admin-error", "");
+    try {
+      const [status, users, files] = await Promise.all([
+        jsonRequest("/api/admin/status"),
+        jsonRequest("/api/admin/users"),
+        jsonRequest("/api/admin/files"),
+      ]);
+      renderAdminStatus(status);
+      renderAdminUrls(status);
+      renderAdminUsers(users.users || []);
+      renderAdminFiles(status, files.files || []);
+      renderDiagnostics(status.debug || {});
+    } catch (error) {
+      if (error.message.includes("(401)")) $("admin-login").hidden = false;
+      else if (error.message.includes("(403)") || error.message === "Forbidden") $("admin-denied").hidden = false;
+      else showError("admin-error", error.message);
+      $("admin-dashboard").hidden = true;
+    }
+  }
+
   async function logout() {
     try {
       await jsonRequest("/auth/logout", { method: "POST", body: "{}" });
@@ -349,10 +390,124 @@
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   }
 
+  function renderAdminStatus(status) {
+    const speculative = status.speculativeDecodingEnabled
+      ? "enabled"
+      : status.speculativeDecodingRequested
+        ? "requested"
+        : "disabled";
+    renderDefinitionList("system-status", [
+      ["Model loaded", status.modelLoaded ? "Yes" : "No"],
+      ["Backend", status.backendStatus || "Unknown"],
+      ["Server mode", status.serverMode || "Unknown"],
+      ["LAN IP", status.lanIp || "Unavailable"],
+      ["MTP/speculative decoding", speculative],
+      ["Active generation", status.activeGeneration ? "Yes" : "No"],
+    ]);
+  }
+
+  function renderAdminUrls(status) {
+    const urls = [
+      ["Normal web app", status.normalWebUrl],
+      ["Coding client base URL", status.codingBaseUrl],
+      ["Conversation client base URL", status.conversationBaseUrl],
+      ["Compatibility base URL", status.compatibilityBaseUrl || `${window.location.origin}/v1`],
+    ];
+    const list = $("admin-urls");
+    list.innerHTML = "";
+    urls.forEach(([label, url]) => {
+      const row = document.createElement("div");
+      row.className = "url-row";
+      row.innerHTML = `<span>${escapeText(label)}</span><code>${escapeText(url || "")}</code>`;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Copy";
+      button.addEventListener("click", () => copyText(url || ""));
+      row.appendChild(button);
+      list.appendChild(row);
+    });
+  }
+
+  function renderAdminUsers(users) {
+    const body = $("admin-users");
+    body.innerHTML = "";
+    users.forEach((user) => {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>${escapeText(user.username)}</td>
+        <td>${escapeText(user.role)}</td>
+        <td>${escapeText(formatDate(user.createdAtMs))}</td>
+        <td>${Number(user.chatCount || 0)}</td>
+        <td>${Number(user.fileCount || 0)}</td>
+      `;
+      body.appendChild(row);
+    });
+  }
+
+  function renderAdminFiles(status, files) {
+    renderDefinitionList("storage-status", [
+      ["Total uploaded files", Number(status.totalFiles || files.length).toString()],
+      ["Approximate storage", formatBytes(status.totalStorageBytes || files.reduce((sum, file) => sum + Number(file.sizeBytes || 0), 0))],
+    ]);
+    const list = $("admin-files");
+    list.innerHTML = "";
+    files.slice(0, 12).forEach((file) => {
+      const item = document.createElement("div");
+      item.className = "recent-file";
+      item.innerHTML = `
+        <strong>${escapeText(file.filename)}</strong>
+        <span class="file-meta">${escapeText(file.username)} - ${formatBytes(file.sizeBytes)} - ${Number(file.chunkCount || 0)} chunks - ${escapeText(formatDate(file.createdAtMs))}</span>
+      `;
+      list.appendChild(item);
+    });
+  }
+
+  function renderDiagnostics(debug) {
+    const links = [
+      debug.perf || "/debug/perf",
+      debug.perfHistory || "/debug/perf/history",
+      debug.config || "/debug/config",
+      debug.routes || "/debug/routes",
+      debug.health || "/health",
+    ];
+    const holder = $("admin-diagnostics");
+    holder.innerHTML = "";
+    links.forEach((href) => {
+      const link = document.createElement("a");
+      link.href = href;
+      link.textContent = href;
+      holder.appendChild(link);
+    });
+  }
+
+  function renderDefinitionList(id, entries) {
+    const list = $(id);
+    list.innerHTML = "";
+    entries.forEach(([label, value]) => {
+      const term = document.createElement("dt");
+      const detail = document.createElement("dd");
+      term.textContent = label;
+      detail.textContent = value;
+      list.append(term, detail);
+    });
+  }
+
+  function formatDate(ms) {
+    const value = Number(ms || 0);
+    if (!value) return "Unknown";
+    return new Date(value).toLocaleString();
+  }
+
+  async function copyText(value) {
+    if (!value) return;
+    await navigator.clipboard.writeText(value);
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     if (page === "index") initIndex().catch(() => { window.location.href = "/login"; });
     if (page === "login") initLogin();
     if (page === "register") initRegister();
     if (page === "chat") initChat().catch((error) => showError("chat-error", error.message));
+    if (page === "admin") initAdmin().catch((error) => showError("admin-error", error.message));
   });
 })();

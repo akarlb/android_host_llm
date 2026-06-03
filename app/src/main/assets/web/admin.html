@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin - Phone Hosted AI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="admin">
+  <div class="admin-shell">
+    <header class="topbar">
+      <div>
+        <h1>Admin</h1>
+        <p id="admin-current-user" class="muted"></p>
+      </div>
+      <nav>
+        <a href="/chat">Chat</a>
+        <button id="admin-logout-button" type="button">Logout</button>
+      </nav>
+    </header>
+    <main class="admin-main">
+      <p id="admin-error" class="error" role="alert"></p>
+      <section id="admin-login" class="admin-panel" hidden>
+        <h2>Sign in required</h2>
+        <p class="muted">Use an admin account to view this dashboard.</p>
+        <a href="/login">Login</a>
+      </section>
+      <section id="admin-denied" class="admin-panel" hidden>
+        <h2>Access denied</h2>
+        <p class="muted">Only admin users can access this page.</p>
+        <a href="/chat">Back to chat</a>
+      </section>
+      <div id="admin-dashboard" class="admin-dashboard" hidden>
+        <section class="warning-panel">
+          This MVP is intended for trusted local networks. Do not expose this server to the public internet.
+        </section>
+        <section class="admin-panel">
+          <div class="panel-heading">
+            <h2>System status</h2>
+            <button id="admin-refresh-button" type="button">Refresh</button>
+          </div>
+          <dl id="system-status" class="status-grid"></dl>
+        </section>
+        <section class="admin-panel">
+          <h2>URLs</h2>
+          <div id="admin-urls" class="url-list"></div>
+        </section>
+        <section class="admin-panel">
+          <h2>Users</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Role</th>
+                  <th>Created</th>
+                  <th>Chats</th>
+                  <th>Files</th>
+                </tr>
+              </thead>
+              <tbody id="admin-users"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="admin-panel">
+          <h2>Files/storage</h2>
+          <dl id="storage-status" class="status-grid"></dl>
+          <div id="admin-files" class="recent-files"></div>
+        </section>
+        <section class="admin-panel">
+          <h2>Diagnostics</h2>
+          <div id="admin-diagnostics" class="diagnostic-links"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

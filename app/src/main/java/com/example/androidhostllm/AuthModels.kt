@@ -6,6 +6,15 @@ data class AuthUser(
     val role: UserRole,
 )
 
+data class AdminUserOverview(
+    val id: String,
+    val username: String,
+    val role: UserRole,
+    val createdAtMs: Long,
+    val chatCount: Int,
+    val fileCount: Int,
+)
+
 data class AuthSession(
     val id: String,
     val token: String,
