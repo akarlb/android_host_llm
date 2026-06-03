@@ -186,6 +186,79 @@ BASE_URL=http://<PHONE_IP>:8080 ./test_auth_foundation.sh
 
 The script prints results and writes Markdown to `results_auth_foundation.md`. Set `RUN_CHAT=0` if the model is not loaded and you only want auth plus lightweight endpoint checks.
 
+## MVP web app quick start
+
+This MVP serves both a normal chat web UI and a minimal admin/operator web UI from the phone. It is intended only for trusted local networks. Do not expose this server to the public internet.
+
+End-to-end setup:
+
+1. Build or download the debug APK.
+2. Install it with `adb install -r app/build/outputs/apk/debug/app-debug.apk`, or sideload the APK on the phone.
+3. Open **LiteRT-LM Local Server** on the phone.
+4. Download or select a compatible `.litertlm` model.
+5. Tap **Load Model**.
+6. Tap **Start Server**.
+7. Note the displayed LAN URL, usually `http://<PHONE_IP>:8080`.
+
+Open the normal web UI from another device on the same LAN:
+
+```text
+http://<PHONE_IP>:8080/chat
+```
+
+First-user bootstrap:
+
+1. Open `http://<PHONE_IP>:8080/register`.
+2. Register the first local account. The first account becomes `ADMIN`.
+3. The app stores the session in the browser and redirects to chat.
+4. Admin users see an **Admin** link in the chat top bar.
+
+Normal-user flow:
+
+1. Register or log in at `/register` or `/login`.
+2. Open `/chat`.
+3. Create or select a chat.
+4. Send messages; responses stream as Server-Sent Events and are saved with the chat.
+5. Refresh `/chat`; saved chats and messages remain available for that authenticated user.
+
+Markdown context:
+
+1. In `/chat`, use the file upload control in the sidebar.
+2. Upload a UTF-8 `.md` file. `text/markdown` and `text/plain` MIME types are accepted when the filename ends in `.md`.
+3. Select one or more uploaded files before sending a message.
+4. The server chunks the Markdown deterministically and injects selected chunks into the generation prompt.
+5. The original user message is saved without expanded file context.
+6. Delete a file from the sidebar when it should no longer be available.
+
+Admin web UI:
+
+```text
+http://<PHONE_IP>:8080/admin
+```
+
+Only `ADMIN` users can access admin APIs. Unauthenticated admin API calls return `401`; authenticated non-admin calls return `403`. The admin page shows model/server status, user and file summaries, diagnostics links, and copyable base URLs:
+
+- Normal web app: `http://<PHONE_IP>:8080/chat`
+- OpenAI-compatible base URL: `http://<PHONE_IP>:8080/v1`
+- Coding client base URL: `http://<PHONE_IP>:8080/coding/v1`
+- Conversation client base URL: `http://<PHONE_IP>:8080/conversation/v1`
+
+External OpenAI-compatible clients:
+
+- Use `/v1` for general compatibility.
+- Use `/coding/v1` for concise coding-oriented responses.
+- Use `/conversation/v1` for balanced conversation-oriented responses.
+- Model ID: `local-litert-lm`.
+- MVP no-auth mode is the default for model-server routes, so API key can be blank or a placeholder if a client requires one.
+
+Final full-stack regression against a running phone server with a loaded model:
+
+```sh
+./test_mvp_full_stack.sh <PHONE_IP> 8080
+```
+
+The script prints live PASS/FAIL output and writes `results_mvp_full_stack.md`. Run it against a fresh app data store when validating first-user admin bootstrap.
+
 ## App chat storage API
 
 Authenticated web-app chat routes persist chats and messages in app-private SQLite storage. They use local session auth with `Authorization: Bearer <SESSION_TOKEN>` or the `session` cookie. Users can only access their own chats; archived chats are hidden and return `404`.
@@ -362,6 +435,12 @@ If you started in localhost-only mode, call `http://127.0.0.1:8080/v1/chat/compl
 
 - Streaming uses LiteRT-LM `sendMessageAsync()` and OpenAI-style SSE chunks ending with `[DONE]`; the client and network stack must keep the HTTP connection open to display chunks incrementally.
 - One active model/conversation at a time.
+- Uploaded context files are `.md` only.
+- There are no embeddings or vector database; Markdown context is direct deterministic prompt injection.
+- PDF, DOCX, OCR, and other binary document formats are not supported.
+- Caregiver/check-in functionality is not implemented yet.
+- There is no public internet hardening; use only on trusted local networks.
+- No NPU backend is implemented.
 - Model download is large and can take a long time.
 - Device battery management may kill the app unless the foreground service/notification is active or the app stays open.
 - LAN access depends on same-network connectivity, router/client isolation, and firewall behavior.

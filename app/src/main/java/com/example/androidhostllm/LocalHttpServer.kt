@@ -46,7 +46,12 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/routes" -> routesResponse(session)
             session.method == Method.GET && path == "/v1" -> routesResponse(session)
             session.method == Method.GET && path == "/health" -> healthResponse()
-            session.method == Method.GET && (path == "/v1/models" || path == "/models") -> modelsResponse()
+            session.method == Method.GET && (
+                path == "/v1/models" ||
+                    path == "/coding/v1/models" ||
+                    path == "/conversation/v1/models" ||
+                    path == "/models"
+                ) -> modelsResponse()
             session.method == Method.POST && path == "/auth/register" -> registerResponse(session)
             session.method == Method.POST && path == "/auth/login" -> loginResponse(session)
             session.method == Method.POST && path == "/auth/logout" -> logoutResponse(session)
@@ -157,6 +162,8 @@ class LocalHttpServer(
                     .put("webFiles", "GET /files")
                     .put("webAdmin", "GET /admin")
                     .put("models", "GET /v1/models")
+                    .put("codingModels", "GET /coding/v1/models")
+                    .put("conversationModels", "GET /conversation/v1/models")
                     .put("chatCompletions", "POST /v1/chat/completions")
                     .put("codingChat", "POST /coding/v1/chat/completions")
                     .put("conversationChat", "POST /conversation/v1/chat/completions")
@@ -219,6 +226,8 @@ class LocalHttpServer(
                 .put("cors", true)
                 .put("privateNetworkAccess", true)
                 .put("modelsEndpoint", true)
+                .put("codingModelsEndpoint", "GET /coding/v1/models")
+                .put("conversationModelsEndpoint", "GET /conversation/v1/models")
                 .put("authRegisterEndpoint", "POST /auth/register")
                 .put("authLoginEndpoint", "POST /auth/login")
                 .put("authLogoutEndpoint", "POST /auth/logout")
