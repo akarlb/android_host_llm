@@ -40,11 +40,15 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE UNIQUE INDEX sessions_token_hash_idx ON sessions(token_hash)")
         db.execSQL("CREATE INDEX sessions_user_id_idx ON sessions(user_id)")
         createChatTables(db)
+        createFileTables(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             createChatTables(db)
+        }
+        if (oldVersion < 3) {
+            createFileTables(db)
         }
     }
 
@@ -77,8 +81,40 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE INDEX IF NOT EXISTS messages_chat_created_idx ON messages(chat_id, created_at_ms)")
     }
 
+    private fun createFileTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS uploaded_files (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                safe_filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                storage_path TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS file_chunks (
+                id TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                heading_path TEXT NULL,
+                content TEXT NOT NULL,
+                char_count INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS uploaded_files_user_created_idx ON uploaded_files(user_id, created_at_ms)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS file_chunks_file_index_idx ON file_chunks(file_id, chunk_index)")
+    }
+
     private companion object {
         const val DATABASE_NAME = "android_host_llm.db"
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 3
     }
 }

@@ -52,6 +52,7 @@ class LocalServerService : Service() {
             appPreferences = preferences,
             authRepository = AuthRepository(applicationContext),
             chatRepository = ChatRepository(applicationContext),
+            fileRepository = FileRepository(applicationContext),
             bindHost = bindHost,
             port = port,
             requireApiKey = requireApiKey,

@@ -208,6 +208,35 @@ BASE_URL=http://<PHONE_IP>:8080 ./test_chat_api.sh
 
 The script prints results and writes Markdown to `results_chat_api.md`.
 
+## Markdown upload and chat context
+
+Authenticated app users can upload Markdown notes for deterministic context injection into normal-user chat requests. Files are stored in app-private storage, tracked in SQLite, owned by exactly one user, and deleted with their stored chunks.
+
+Routes:
+
+- `GET /api/files`
+- `POST /api/files/upload` with JSON `{"filename":"notes.md","mimeType":"text/markdown","content":"# Notes\n..."}`
+- `GET /api/files/{fileId}`
+- `DELETE /api/files/{fileId}`
+
+The MVP upload route intentionally uses the documented JSON fallback instead of multipart. Only `.md` files are accepted. `text/markdown` is preferred, and `text/plain` with a `.md` filename is accepted. Uploads over 2 MB are rejected with `413`.
+
+`POST /api/chats/{chatId}/messages` accepts selected Markdown files:
+
+```json
+{"content":"What does this file say?","stream":true,"fileIds":["..."]}
+```
+
+The original user message is persisted unchanged. Selected file chunks are loaded in deterministic file/chunk order, capped to a conservative context budget, and injected only into the prompt sent to LiteRT-LM. Non-streaming responses include `context` metadata with `includedChunks`, `includedChars`, and `truncated`; streaming responses emit the same metadata as an SSE event when file context is used.
+
+To smoke-test Markdown upload and context against a running phone server with the model loaded:
+
+```sh
+BASE_URL=http://<PHONE_IP>:8080 ./test_markdown_context.sh
+```
+
+The script prints results and writes Markdown to `results_markdown_context.md`.
+
 ## Page Assist / OpenAI-compatible clients
 
 Use these settings for Page Assist or another OpenAI-compatible client:

@@ -14,6 +14,7 @@ class LocalHttpServer(
     private val appPreferences: AppPreferences,
     private val authRepository: AuthRepository,
     private val chatRepository: ChatRepository,
+    private val fileRepository: FileRepository,
     private val bindHost: String,
     port: Int,
     private val requireApiKey: Boolean,
@@ -29,6 +30,7 @@ class LocalHttpServer(
         val path = normalizePath(session.uri.orEmpty())
         val chatId = chatIdFromPath(path)
         val messageChatId = chatMessageChatIdFromPath(path)
+        val fileId = fileIdFromPath(path)
         return when {
             session.method == Method.GET && path == "/" -> routesResponse(session)
             session.method == Method.GET && path == "/routes" -> routesResponse(session)
@@ -41,6 +43,10 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/auth/session" -> sessionResponse(session)
             session.method == Method.GET && path == "/api/chats" -> listChatsResponse(session)
             session.method == Method.POST && path == "/api/chats" -> createChatResponse(session)
+            session.method == Method.GET && path == "/api/files" -> listFilesResponse(session)
+            session.method == Method.POST && path == "/api/files/upload" -> uploadFileResponse(session)
+            session.method == Method.GET && fileId != null -> getFileResponse(session, fileId)
+            session.method == Method.DELETE && fileId != null -> deleteFileResponse(session, fileId)
             session.method == Method.GET && chatId != null -> getChatResponse(session, chatId)
             session.method == Method.POST && messageChatId != null -> createMessageResponse(session, messageChatId)
             session.method == Method.DELETE && chatId != null -> deleteChatResponse(session, chatId)
@@ -86,6 +92,11 @@ class LocalHttpServer(
         return if (parts.size == 4 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "messages") parts[2] else null
     }
 
+    private fun fileIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 3 && parts[0] == "api" && parts[1] == "files") parts[2] else null
+    }
+
     private fun routesResponse(session: IHTTPSession): Response {
         return jsonResponse(Response.Status.OK, routeHelpJson(session))
     }
@@ -111,6 +122,9 @@ class LocalHttpServer(
                     .put("chats", "GET/POST /api/chats")
                     .put("chatDetail", "GET/DELETE /api/chats/{chatId}")
                     .put("chatMessages", "POST /api/chats/{chatId}/messages")
+                    .put("files", "GET /api/files")
+                    .put("fileUpload", "POST /api/files/upload")
+                    .put("fileDetail", "GET/DELETE /api/files/{fileId}")
                     .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
                     .put("performanceHistory", "GET /debug/perf/history")
@@ -166,6 +180,10 @@ class LocalHttpServer(
                 .put("chatDetailEndpoint", "GET /api/chats/{chatId}")
                 .put("chatMessageEndpoint", "POST /api/chats/{chatId}/messages")
                 .put("chatDeleteEndpoint", "DELETE /api/chats/{chatId}")
+                .put("fileListEndpoint", "GET /api/files")
+                .put("fileUploadEndpoint", "POST /api/files/upload")
+                .put("fileDetailEndpoint", "GET /api/files/{fileId}")
+                .put("fileDeleteEndpoint", "DELETE /api/files/{fileId}")
                 .put("streamingCompat", true)
                 .put("streamingIncremental", true)
                 .put("resetConversationEndpoint", "POST /v1/conversation/reset")
@@ -309,6 +327,73 @@ class LocalHttpServer(
         )
     }
 
+    private fun listFilesResponse(session: IHTTPSession): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val files = JSONArray()
+        fileRepository.listFiles(user.id).forEach { files.put(fileJson(it)) }
+        return jsonResponse(Response.Status.OK, JSONObject().put("files", files))
+    }
+
+    private fun uploadFileResponse(session: IHTTPSession): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val requestJson = readJsonRequest(session) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Malformed JSON or missing JSON body. JSON upload expects filename and content.")
+        )
+        return when (
+            val result = fileRepository.uploadMarkdown(
+                userId = user.id,
+                filename = requestJson.optString("filename"),
+                content = if (requestJson.has("content") && !requestJson.isNull("content")) requestJson.optString("content") else null,
+                mimeType = if (requestJson.has("mimeType") && !requestJson.isNull("mimeType")) requestJson.optString("mimeType") else null,
+            )
+        ) {
+            is FileUploadResult.Success -> jsonResponse(
+                Response.Status.OK,
+                JSONObject()
+                    .put("status", "ok")
+                    .put("file", fileJson(result.file))
+            )
+            FileUploadResult.InvalidFilename -> jsonResponse(
+                Response.Status.BAD_REQUEST,
+                JSONObject().put("error", "Invalid filename")
+            )
+            FileUploadResult.InvalidType -> jsonResponse(
+                Response.Status.BAD_REQUEST,
+                JSONObject().put("error", "Only .md Markdown files are accepted")
+            )
+            FileUploadResult.Oversized -> jsonResponse(
+                Response.Status.PAYLOAD_TOO_LARGE,
+                JSONObject().put("error", "Markdown file exceeds 2 MB limit")
+            )
+            FileUploadResult.InvalidEncoding -> jsonResponse(
+                Response.Status.BAD_REQUEST,
+                JSONObject().put("error", "Markdown content must be UTF-8 text")
+            )
+        }
+    }
+
+    private fun getFileResponse(session: IHTTPSession, fileId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val file = fileRepository.getFile(user.id, fileId) ?: return notFoundResponse()
+        val chunks = JSONArray()
+        fileRepository.listChunks(user.id, fileId).orEmpty().forEach { chunk ->
+            chunks.put(chunkPreviewJson(chunk))
+        }
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("file", fileJson(file))
+                .put("chunks", chunks)
+        )
+    }
+
+    private fun deleteFileResponse(session: IHTTPSession, fileId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        if (!fileRepository.deleteFile(user.id, fileId)) return notFoundResponse()
+        return jsonResponse(Response.Status.OK, JSONObject().put("status", "ok"))
+    }
+
     private fun createMessageResponse(session: IHTTPSession, chatId: String): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
@@ -323,14 +408,21 @@ class LocalHttpServer(
         if (requestJson.has("fileIds") && !requestJson.isNull("fileIds") && requestJson.optJSONArray("fileIds") == null) {
             return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "fileIds must be an array"))
         }
+        val fileIds = parseFileIds(requestJson)
+        val context = if (fileIds.isEmpty()) null else {
+            fileRepository.buildContext(user.id, fileIds) ?: return notFoundResponse()
+        }
 
         val userMessage = chatRepository.addMessage(chat.id, "user", content)
         val messages = chatRepository.listMessages(user.id, chat.id).orEmpty()
-        val prompt = liteRtLmManager.applyResponseModeHint(renderChatPrompt(messages), responseModeForChatProfile(chat.profile))
+        val prompt = liteRtLmManager.applyResponseModeHint(
+            renderChatPrompt(messages, context, userMessage.id),
+            responseModeForChatProfile(chat.profile)
+        )
         val conversationMode = ConversationMode.FRESH_PER_REQUEST
         val responseMode = responseModeForChatProfile(chat.profile)
         return if (requestJson.optBoolean("stream", false)) {
-            streamingAppMessageResponse(chat, userMessage, prompt, conversationMode, responseMode)
+            streamingAppMessageResponse(chat, userMessage, prompt, conversationMode, responseMode, context)
         } else {
             if (!liteRtLmManager.isLoaded()) {
                 return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, JSONObject().put("error", "Model is not loaded"))
@@ -350,6 +442,7 @@ class LocalHttpServer(
                         JSONObject()
                             .put("message", messageJson(assistantMessage))
                             .put("userMessage", messageJson(userMessage))
+                            .put("context", contextJson(context))
                     )
                 },
                 onFailure = { error ->
@@ -812,6 +905,7 @@ class LocalHttpServer(
         prompt: String,
         conversationMode: ConversationMode,
         responseMode: ResponseMode,
+        context: FileContextBuildResult?,
     ): Response {
         val input = PipedInputStream(STREAM_PIPE_BUFFER_BYTES)
         val output = PipedOutputStream(input)
@@ -830,6 +924,9 @@ class LocalHttpServer(
                         writeEvent(JSONObject().put("error", "Model is not loaded").toString())
                         writeEvent("[DONE]")
                         return@use
+                    }
+                    if (context != null) {
+                        writeEvent(JSONObject().put("context", contextJson(context)).toString())
                     }
                     val result = runBlocking {
                         liteRtLmManager.generateStreaming(
@@ -899,6 +996,40 @@ class LocalHttpServer(
             .put("createdAtMs", message.createdAtMs)
     }
 
+    private fun fileJson(file: UploadedFileRecord): JSONObject {
+        return JSONObject()
+            .put("id", file.id)
+            .put("filename", file.safeFilename)
+            .put("originalFilename", file.originalFilename)
+            .put("mimeType", file.mimeType)
+            .put("sizeBytes", file.sizeBytes)
+            .put("chunkCount", file.chunkCount)
+            .put("createdAtMs", file.createdAtMs)
+    }
+
+    private fun chunkPreviewJson(chunk: FileChunkRecord): JSONObject {
+        return JSONObject()
+            .put("chunkIndex", chunk.chunkIndex)
+            .put("headingPath", chunk.headingPath ?: JSONObject.NULL)
+            .put("charCount", chunk.charCount)
+            .put("preview", chunk.content.take(CHUNK_PREVIEW_CHARS))
+    }
+
+    private fun contextJson(context: FileContextBuildResult?): JSONObject {
+        if (context == null) {
+            return JSONObject()
+                .put("fileIds", JSONArray())
+                .put("includedChunks", 0)
+                .put("includedChars", 0)
+                .put("truncated", false)
+        }
+        return JSONObject()
+            .put("fileIds", JSONArray(context.fileIds))
+            .put("includedChunks", context.includedChunks)
+            .put("includedChars", context.includedChars)
+            .put("truncated", context.truncated)
+    }
+
     private fun responseModeForChatProfile(profile: ChatProfile): ResponseMode {
         return when (profile) {
             ChatProfile.CODING -> ResponseMode.CODING_CONCISE
@@ -907,16 +1038,37 @@ class LocalHttpServer(
         }
     }
 
-    private fun renderChatPrompt(messages: List<MessageRecord>): String {
+    private fun renderChatPrompt(
+        messages: List<MessageRecord>,
+        context: FileContextBuildResult? = null,
+        contextMessageId: String? = null,
+    ): String {
         return buildString {
             appendLine("Continue this chat. Use the prior turns only as context.")
             messages.takeLast(MAX_PROMPT_MESSAGES).forEach { message ->
                 append(message.role)
                 append(": ")
-                appendLine(message.content)
+                if (context != null && message.id == contextMessageId && message.role == "user") {
+                    appendLine(context.promptBlock)
+                    appendLine()
+                    appendLine("User question:")
+                    appendLine(message.content)
+                } else {
+                    appendLine(message.content)
+                }
             }
             append("assistant:")
         }
+    }
+
+    private fun parseFileIds(json: JSONObject): List<String> {
+        val array = json.optJSONArray("fileIds") ?: return emptyList()
+        val ids = mutableListOf<String>()
+        for (index in 0 until array.length()) {
+            val value = array.optString(index).trim()
+            if (value.isNotBlank()) ids += value
+        }
+        return ids.distinct()
     }
 
     private fun isAuthorized(session: IHTTPSession): Boolean {
@@ -1027,5 +1179,6 @@ class LocalHttpServer(
     private companion object {
         const val STREAM_PIPE_BUFFER_BYTES = 64 * 1024
         const val MAX_PROMPT_MESSAGES = 24
+        const val CHUNK_PREVIEW_CHARS = 500
     }
 }
