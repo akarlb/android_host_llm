@@ -29,17 +29,24 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/" -> routesResponse(session)
             session.method == Method.GET && path == "/routes" -> routesResponse(session)
             session.method == Method.GET && path == "/v1" -> routesResponse(session)
+            session.method == Method.GET && path == "/coding" -> profileHelpResponse(session, SessionProfile.CODING)
+            session.method == Method.GET && path == "/coding/v1" -> profileHelpResponse(session, SessionProfile.CODING)
+            session.method == Method.GET && path == "/conversation" -> profileHelpResponse(session, SessionProfile.CONVERSATION)
+            session.method == Method.GET && path == "/conversation/v1" -> profileHelpResponse(session, SessionProfile.CONVERSATION)
             session.method == Method.GET && path == "/health" -> healthResponse()
-            session.method == Method.GET && (path == "/v1/models" || path == "/models") -> modelsResponse()
+            session.method == Method.GET && (path == "/v1/models" || path == "/models" || path == "/coding/v1/models" || path == "/conversation/v1/models") -> modelsResponse()
             session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse()
             session.method == Method.GET && path == "/debug/perf" -> performanceResponse()
             session.method == Method.GET && path == "/debug/perf/history" -> performanceHistoryResponse()
             session.method == Method.GET && path == "/debug/config" -> configResponse()
             session.method == Method.POST && path == "/debug/config" -> updateConfigResponse(session)
+            session.method == Method.GET && path == "/debug/benchmark/presets" -> benchmarkPresetsResponse()
             session.method == Method.POST && path == "/debug/benchmark" -> benchmarkResponse(session)
             session.method == Method.POST && path == "/v1/conversation/reset" -> resetConversationResponse(session)
-            session.method == Method.POST && path == "/v1/chat/completions" -> chatCompletionResponse(session)
-            session.method == Method.GET && path == "/v1/chat/completions" -> methodNotAllowedResponse()
+            session.method == Method.POST && path == "/v1/chat/completions" -> chatCompletionResponse(session, null)
+            session.method == Method.POST && path == "/coding/v1/chat/completions" -> chatCompletionResponse(session, SessionProfile.CODING)
+            session.method == Method.POST && path == "/conversation/v1/chat/completions" -> chatCompletionResponse(session, SessionProfile.CONVERSATION)
+            session.method == Method.GET && (path == "/v1/chat/completions" || path == "/coding/v1/chat/completions" || path == "/conversation/v1/chat/completions") -> methodNotAllowedResponse()
             else -> jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
         }
     }
@@ -70,18 +77,52 @@ class LocalHttpServer(
             .put("message", "LiteRT-LM local server is running")
             .put("baseUrl", "http://$host/v1")
             .put(
+                "recommendedBaseUrls",
+                JSONObject()
+                    .put("codingTools", "http://$host/coding/v1")
+                    .put("conversationUi", "http://$host/conversation/v1")
+                    .put("compatibilityDefault", "http://$host/v1")
+            )
+            .put(
                 "routes",
                 JSONObject()
                     .put("health", "GET /health")
                     .put("models", "GET /v1/models")
                     .put("chat", "POST /v1/chat/completions")
+                    .put("codingProfile", "POST /coding/v1/chat/completions")
+                    .put("conversationProfile", "POST /conversation/v1/chat/completions")
                     .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
                     .put("performanceHistory", "GET /debug/perf/history")
                     .put("config", "GET/POST /debug/config")
                     .put("benchmark", "POST /debug/benchmark")
+                    .put("benchmarkPresets", "GET /debug/benchmark/presets")
+            )
+            .put("profiles", JSONObject()
+                .put("/coding/v1", "Uses Coding profile for each request: fast patch answers and fresh request sessions.")
+                .put("/conversation/v1", "Uses Conversation profile for each request: persistent memory and balanced replies.")
+                .put("/v1", "Uses the globally selected profile or custom config.")
             )
             .put("note", "Use POST for /v1/chat/completions. Browser GET requests do not run inference.")
+    }
+
+    private fun profileHelpResponse(session: IHTTPSession, profile: SessionProfile): Response {
+        val host = session.headers["host"] ?: session.headers["Host"] ?: "$bindHost:${listeningPort}"
+        val prefix = if (profile == SessionProfile.CODING) "/coding/v1" else "/conversation/v1"
+        val settings = SessionProfilePresets.settingsFor(profile)
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("baseUrl", "http://$host$prefix")
+                .put("chat", "POST $prefix/chat/completions")
+                .put("models", "GET $prefix/models")
+                .put("sessionProfile", profile.name)
+                .put("responseMode", settings.responseMode.name)
+                .put("conversationMode", settings.conversationMode.name)
+                .put("resetPolicy", settings.resetPolicy.name)
+                .put("behavior", profile.summary)
+        )
     }
 
     private fun healthResponse(): Response {
@@ -128,6 +169,9 @@ class LocalHttpServer(
                 .put("performanceHistoryEndpoint", "GET /debug/perf/history")
                 .put("configEndpoint", "GET/POST /debug/config")
                 .put("benchmarkEndpoint", "POST /debug/benchmark")
+                .put("benchmarkPresetsEndpoint", "GET /debug/benchmark/presets")
+                .put("codingProfileEndpoint", "POST /coding/v1/chat/completions")
+                .put("conversationProfileEndpoint", "POST /conversation/v1/chat/completions")
         )
     }
 
@@ -150,41 +194,21 @@ class LocalHttpServer(
         )
 
         val warnings = JSONArray()
-
-        if (requestJson.has("conversationMode") && !requestJson.isNull("conversationMode")) {
-            val value = parseConversationMode(requestJson.optString("conversationMode")) ?: return invalidConfigValue("conversationMode")
-            val result = runBlocking { liteRtLmManager.setConversationMode(value) }
-            if (result.isFailure) {
-                return jsonResponse(
-                    Response.Status.BAD_REQUEST,
-                    JSONObject().put("error", result.exceptionOrNull()?.message ?: "Could not change conversation mode")
-                )
-            }
-            appPreferences.saveConversationMode(value)
+        validateConfigEnums(requestJson)?.let { return it }
+        val settingsResult = buildConfigSettings(requestJson) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Invalid config value")
+        )
+        val result = runBlocking { liteRtLmManager.applyGenerationSettings(settingsResult) }
+        if (result.isFailure) {
+            return jsonResponse(
+                Response.Status.BAD_REQUEST,
+                JSONObject().put("error", result.exceptionOrNull()?.message ?: "Could not change generation settings")
+            )
         }
-
-        if (requestJson.has("responseMode") && !requestJson.isNull("responseMode")) {
-            val value = parseResponseMode(requestJson.optString("responseMode")) ?: return invalidConfigValue("responseMode")
-            liteRtLmManager.setResponseMode(value)
-            appPreferences.saveResponseMode(value)
-        }
-
-        if (requestJson.has("generationTimeoutSeconds") && !requestJson.isNull("generationTimeoutSeconds")) {
-            val timeoutSeconds = requestJson.optInt("generationTimeoutSeconds", -1)
-            if (timeoutSeconds !in 10..600) {
-                return jsonResponse(
-                    Response.Status.BAD_REQUEST,
-                    JSONObject().put("error", "generationTimeoutSeconds must be between 10 and 600")
-                )
-            }
-            liteRtLmManager.setGenerationTimeoutSeconds(timeoutSeconds)
-            appPreferences.saveGenerationTimeoutSeconds(timeoutSeconds)
-        }
+        appPreferences.saveGenerationSettings(settingsResult)
 
         if (requestJson.has("speculativeDecodingRequested") && !requestJson.isNull("speculativeDecodingRequested")) {
-            val value = requestJson.optBoolean("speculativeDecodingRequested")
-            liteRtLmManager.setSpeculativeDecodingRequested(value)
-            appPreferences.saveSpeculativeDecodingRequested(value)
             warnings.put("MTP setting changed; reload model for this to take effect.")
         }
 
@@ -195,6 +219,76 @@ class LocalHttpServer(
                 .put("config", configJson())
                 .put("warnings", warnings)
         )
+    }
+
+    private fun validateConfigEnums(requestJson: JSONObject): Response? {
+        if (requestJson.has("sessionProfile") && !requestJson.isNull("sessionProfile") && parseSessionProfile(requestJson.optString("sessionProfile")) == null) {
+            return invalidConfigValue("sessionProfile")
+        }
+        if (requestJson.has("conversationMode") && !requestJson.isNull("conversationMode") && parseConversationMode(requestJson.optString("conversationMode")) == null) {
+            return invalidConfigValue("conversationMode")
+        }
+        if (requestJson.has("responseMode") && !requestJson.isNull("responseMode") && parseResponseMode(requestJson.optString("responseMode")) == null) {
+            return invalidConfigValue("responseMode")
+        }
+        if (requestJson.has("resetPolicy") && !requestJson.isNull("resetPolicy") && parseResetPolicy(requestJson.optString("resetPolicy")) == null) {
+            return invalidConfigValue("resetPolicy")
+        }
+        if (requestJson.has("generationTimeoutSeconds") && !requestJson.isNull("generationTimeoutSeconds")) {
+            val timeoutSeconds = requestJson.optInt("generationTimeoutSeconds", -1)
+            if (timeoutSeconds !in 10..600) {
+                return jsonResponse(
+                    Response.Status.BAD_REQUEST,
+                    JSONObject().put("error", "generationTimeoutSeconds must be between 10 and 600")
+                )
+            }
+        }
+        return null
+    }
+
+    private fun buildConfigSettings(requestJson: JSONObject): GenerationSettings? {
+        val requestedProfile = if (requestJson.has("sessionProfile") && !requestJson.isNull("sessionProfile")) {
+            parseSessionProfile(requestJson.optString("sessionProfile")) ?: return null
+        } else {
+            liteRtLmManager.sessionProfile()
+        }
+        val current = currentGlobalSettings()
+        var settings = if (requestedProfile == SessionProfile.CUSTOM) {
+            current.copy(sessionProfile = SessionProfile.CUSTOM)
+        } else {
+            SessionProfilePresets.settingsFor(requestedProfile)
+        }
+        var advancedChanged = false
+
+        if (requestJson.has("conversationMode") && !requestJson.isNull("conversationMode")) {
+            settings = settings.copy(conversationMode = parseConversationMode(requestJson.optString("conversationMode")) ?: return null)
+            advancedChanged = true
+        }
+        if (requestJson.has("responseMode") && !requestJson.isNull("responseMode")) {
+            settings = settings.copy(responseMode = parseResponseMode(requestJson.optString("responseMode")) ?: return null)
+            advancedChanged = true
+        }
+        if (requestJson.has("resetPolicy") && !requestJson.isNull("resetPolicy")) {
+            settings = settings.copy(resetPolicy = parseResetPolicy(requestJson.optString("resetPolicy")) ?: return null)
+            advancedChanged = true
+        }
+        if (requestJson.has("generationTimeoutSeconds") && !requestJson.isNull("generationTimeoutSeconds")) {
+            val timeoutSeconds = requestJson.optInt("generationTimeoutSeconds", -1)
+            if (timeoutSeconds !in 10..600) return null
+            settings = settings.copy(timeoutSeconds = timeoutSeconds)
+            advancedChanged = true
+        }
+        if (requestJson.has("speculativeDecodingRequested") && !requestJson.isNull("speculativeDecodingRequested")) {
+            settings = settings.copy(speculativeDecodingRequested = requestJson.optBoolean("speculativeDecodingRequested"))
+            advancedChanged = true
+        }
+
+        val effectiveProfile = if (advancedChanged) {
+            SessionProfilePresets.matchingProfile(settings)
+        } else {
+            requestedProfile
+        }
+        return settings.copy(sessionProfile = effectiveProfile)
     }
 
     private fun benchmarkResponse(session: IHTTPSession): Response {
@@ -212,64 +306,38 @@ class LocalHttpServer(
         val iterations = requestJson.optInt("iterations", 1).coerceIn(1, 5)
         val stream = requestJson.optBoolean("stream", true)
         val resetBeforeEach = requestJson.optBoolean("resetBeforeEach", false)
-        val conversationModeOverride = if (requestJson.has("conversationMode") && !requestJson.isNull("conversationMode")) {
-            parseConversationMode(requestJson.optString("conversationMode")) ?: return invalidConfigValue("conversationMode")
-        } else null
-        val responseModeOverride = if (requestJson.has("responseMode") && !requestJson.isNull("responseMode")) {
-            parseResponseMode(requestJson.optString("responseMode")) ?: return invalidConfigValue("responseMode")
-        } else null
-
-        val previousConversationMode = liteRtLmManager.conversationMode()
-        val benchmarkConversationMode = conversationModeOverride ?: previousConversationMode
-        val switchResult = if (conversationModeOverride != null) {
-            runBlocking { liteRtLmManager.setConversationMode(benchmarkConversationMode) }
-        } else {
-            Result.success(Unit)
-        }
-        if (switchResult.isFailure) {
-            return jsonResponse(
-                Response.Status.BAD_REQUEST,
-                JSONObject().put("error", switchResult.exceptionOrNull()?.message ?: "Could not change conversation mode for benchmark")
-            )
-        }
+        val benchmarkSettings = buildBenchmarkSettings(requestJson) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Invalid benchmark config value")
+        )
 
         val results = JSONArray()
-        try {
-            repeat(iterations) { index ->
-                val effectiveResponseMode = responseModeOverride ?: liteRtLmManager.responseMode()
-                val effectiveConversationMode = benchmarkConversationMode
-                if (resetBeforeEach) {
-                    val resetResult = runBlocking { liteRtLmManager.resetConversation() }
-                    if (resetResult.isFailure) {
-                        results.put(benchmarkErrorJson(index + 1, effectiveConversationMode, effectiveResponseMode, resetResult.exceptionOrNull()))
-                        return@repeat
-                    }
+        repeat(iterations) { index ->
+            if (resetBeforeEach && benchmarkSettings.conversationMode == ConversationMode.PERSISTENT) {
+                val resetResult = runBlocking { liteRtLmManager.resetConversation() }
+                if (resetResult.isFailure) {
+                    results.put(benchmarkErrorJson(index + 1, benchmarkSettings, resetResult.exceptionOrNull()))
+                    return@repeat
                 }
+            }
 
-                val prompted = liteRtLmManager.applyResponseModeHint(prompt, effectiveResponseMode)
-                val result = runBlocking {
-                    if (stream) {
-                        liteRtLmManager.generateStreaming(
-                            prompt = prompted,
-                            onChunk = { },
-                            conversationModeOverride = effectiveConversationMode,
-                            responseModeOverride = effectiveResponseMode,
-                        )
-                    } else {
-                        liteRtLmManager.generate(
-                            prompt = prompted,
-                            conversationModeOverride = effectiveConversationMode,
-                            responseModeOverride = effectiveResponseMode,
-                        )
-                    }
+            val prompted = liteRtLmManager.applyResponseModeHint(prompt, benchmarkSettings.responseMode)
+            val result = runBlocking {
+                if (stream) {
+                    liteRtLmManager.generateStreaming(
+                        prompt = prompted,
+                        onChunk = { },
+                        settingsOverride = benchmarkSettings,
+                    )
+                } else {
+                    liteRtLmManager.generate(
+                        prompt = prompted,
+                        settingsOverride = benchmarkSettings,
+                    )
                 }
-                val snapshot = liteRtLmManager.performanceSnapshot()
-                results.put(benchmarkResultJson(index + 1, snapshot, effectiveConversationMode, effectiveResponseMode, result.exceptionOrNull()))
             }
-        } finally {
-            if (conversationModeOverride != null && previousConversationMode != benchmarkConversationMode) {
-                runBlocking { liteRtLmManager.setConversationMode(previousConversationMode) }
-            }
+            val snapshot = liteRtLmManager.performanceSnapshot()
+            results.put(benchmarkResultJson(index + 1, snapshot, benchmarkSettings, result.exceptionOrNull()))
         }
 
         return jsonResponse(
@@ -277,9 +345,47 @@ class LocalHttpServer(
             JSONObject()
                 .put("status", "ok")
                 .put("iterations", iterations)
+                .put("sessionProfile", benchmarkSettings.sessionProfile.name)
+                .put("effectiveConversationMode", benchmarkSettings.conversationMode.name)
+                .put("effectiveResponseMode", benchmarkSettings.responseMode.name)
+                .put("resetPolicy", benchmarkSettings.resetPolicy.name)
                 .put("results", results)
                 .put("average", benchmarkAverageJson(results))
         )
+    }
+
+    private fun buildBenchmarkSettings(requestJson: JSONObject): GenerationSettings? {
+        val baseProfile = if (requestJson.has("sessionProfile") && !requestJson.isNull("sessionProfile")) {
+            parseSessionProfile(requestJson.optString("sessionProfile")) ?: return null
+        } else {
+            liteRtLmManager.sessionProfile()
+        }
+        var settings = if (baseProfile == SessionProfile.CUSTOM) {
+            currentGlobalSettings().copy(sessionProfile = SessionProfile.CUSTOM)
+        } else {
+            SessionProfilePresets.settingsFor(baseProfile)
+        }
+        var advancedChanged = false
+        if (requestJson.has("conversationMode") && !requestJson.isNull("conversationMode")) {
+            settings = settings.copy(conversationMode = parseConversationMode(requestJson.optString("conversationMode")) ?: return null)
+            advancedChanged = true
+        }
+        if (requestJson.has("responseMode") && !requestJson.isNull("responseMode")) {
+            settings = settings.copy(responseMode = parseResponseMode(requestJson.optString("responseMode")) ?: return null)
+            advancedChanged = true
+        }
+        if (requestJson.has("resetPolicy") && !requestJson.isNull("resetPolicy")) {
+            settings = settings.copy(resetPolicy = parseResetPolicy(requestJson.optString("resetPolicy")) ?: return null)
+            advancedChanged = true
+        }
+        if (requestJson.has("generationTimeoutSeconds") && !requestJson.isNull("generationTimeoutSeconds")) {
+            val timeoutSeconds = requestJson.optInt("generationTimeoutSeconds", -1)
+            if (timeoutSeconds !in 10..600) return null
+            settings = settings.copy(timeoutSeconds = timeoutSeconds)
+            advancedChanged = true
+        }
+        val profile = if (advancedChanged) SessionProfilePresets.matchingProfile(settings) else baseProfile
+        return settings.copy(sessionProfile = profile)
     }
 
     private fun resetConversationResponse(session: IHTTPSession): Response {
@@ -312,7 +418,7 @@ class LocalHttpServer(
         )
     }
 
-    private fun chatCompletionResponse(session: IHTTPSession): Response {
+    private fun chatCompletionResponse(session: IHTTPSession, forcedProfile: SessionProfile?): Response {
         if (!isAuthorized(session)) {
             return jsonResponse(Response.Status.UNAUTHORIZED, JSONObject().put("error", "Unauthorized"))
         }
@@ -348,17 +454,18 @@ class LocalHttpServer(
                 JSONObject().put("error", "Missing prompt or user message content")
             )
         }
-        val promptedWithStyle = liteRtLmManager.applyResponseModeHint(prompt)
+        val settings = requestSettings(forcedProfile)
+        val promptedWithStyle = liteRtLmManager.applyResponseModeHint(prompt, settings.responseMode)
 
         val stream = requestJson.optBoolean("stream", false)
         val nowSeconds = System.currentTimeMillis() / 1000
         val completionId = "chatcmpl-local-$nowSeconds"
 
         if (stream) {
-            return streamingChatCompletionResponse(completionId, nowSeconds, promptedWithStyle)
+            return streamingChatCompletionResponse(completionId, nowSeconds, promptedWithStyle, settings)
         }
 
-        val result = runBlocking { liteRtLmManager.generate(promptedWithStyle) }
+        val result = runBlocking { liteRtLmManager.generate(promptedWithStyle, settingsOverride = settings) }
         return result.fold(
             onSuccess = { output ->
                 jsonResponse(Response.Status.OK, chatCompletionJson(completionId, nowSeconds, output))
@@ -395,7 +502,7 @@ class LocalHttpServer(
             .put("response", output)
     }
 
-    private fun streamingChatCompletionResponse(completionId: String, created: Long, prompt: String): Response {
+    private fun streamingChatCompletionResponse(completionId: String, created: Long, prompt: String, settings: GenerationSettings): Response {
         val input = PipedInputStream(STREAM_PIPE_BUFFER_BYTES)
         val output = PipedOutputStream(input)
 
@@ -416,6 +523,7 @@ class LocalHttpServer(
                             onChunk = { chunk ->
                                 writeEvent(chatCompletionChunkJson(completionId, created, content = chunk).toString())
                             },
+                            settingsOverride = settings,
                         )
                     }
                     result.fold(
@@ -447,6 +555,7 @@ class LocalHttpServer(
     }
 
     private fun configJson(): JSONObject {
+        val settings = currentGlobalSettings()
         return JSONObject()
             .put("modelLoaded", liteRtLmManager.isLoaded())
             .put("backendStatus", liteRtLmManager.backendStatus())
@@ -456,17 +565,58 @@ class LocalHttpServer(
             .put("conversationActive", liteRtLmManager.conversationActive())
             .put("activeGeneration", liteRtLmManager.activeGeneration())
             .put("responseMode", liteRtLmManager.responseMode().name)
+            .put("resetPolicy", liteRtLmManager.resetPolicy().name)
+            .put("sessionProfile", settings.sessionProfile.name)
+            .put("effectiveResponseMode", settings.responseMode.name)
+            .put("effectiveConversationMode", settings.conversationMode.name)
+            .put("effectiveResetPolicy", settings.resetPolicy.name)
             .put("generationTimeoutSeconds", liteRtLmManager.generationTimeoutSeconds())
             .put("serverMode", serverMode)
             .put("streamingSupported", true)
             .put("modelId", modelId)
     }
 
+    private fun benchmarkPresetsResponse(): Response {
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject().put(
+                "presets",
+                JSONArray()
+                    .put(benchmarkPresetJson("coding", "/coding/v1", SessionProfile.CODING))
+                    .put(benchmarkPresetJson("conversation", "/conversation/v1", SessionProfile.CONVERSATION))
+            )
+        )
+    }
+
+    private fun benchmarkPresetJson(name: String, urlBase: String, profile: SessionProfile): JSONObject {
+        val settings = SessionProfilePresets.settingsFor(profile)
+        return JSONObject()
+            .put("name", name)
+            .put("urlBase", urlBase)
+            .put("sessionProfile", profile.name)
+            .put("responseMode", settings.responseMode.name)
+            .put("conversationMode", settings.conversationMode.name)
+    }
+
+    private fun currentGlobalSettings(): GenerationSettings {
+        return GenerationSettings(
+            sessionProfile = liteRtLmManager.sessionProfile(),
+            responseMode = liteRtLmManager.responseMode(),
+            conversationMode = liteRtLmManager.conversationMode(),
+            resetPolicy = liteRtLmManager.resetPolicy(),
+            timeoutSeconds = liteRtLmManager.generationTimeoutSeconds(),
+            speculativeDecodingRequested = liteRtLmManager.speculativeDecodingRequested(),
+        )
+    }
+
+    private fun requestSettings(forcedProfile: SessionProfile?): GenerationSettings {
+        return forcedProfile?.let { SessionProfilePresets.settingsFor(it) } ?: currentGlobalSettings()
+    }
+
     private fun benchmarkResultJson(
         iteration: Int,
         snapshot: PerformanceSnapshot,
-        conversationMode: ConversationMode,
-        responseMode: ResponseMode,
+        settings: GenerationSettings,
         error: Throwable?,
     ): JSONObject {
         return JSONObject()
@@ -478,15 +628,18 @@ class LocalHttpServer(
             .put("chunkCount", snapshot.lastChunkCount)
             .put("backendStatus", snapshot.backendStatus)
             .put("speculativeDecodingEnabled", snapshot.speculativeDecodingEnabled)
-            .put("conversationMode", conversationMode.name)
-            .put("responseMode", responseMode.name)
+            .put("sessionProfile", settings.sessionProfile.name)
+            .put("conversationMode", settings.conversationMode.name)
+            .put("responseMode", settings.responseMode.name)
+            .put("effectiveConversationMode", settings.conversationMode.name)
+            .put("effectiveResponseMode", settings.responseMode.name)
+            .put("resetPolicy", settings.resetPolicy.name)
             .put("error", error?.message ?: JSONObject.NULL)
     }
 
     private fun benchmarkErrorJson(
         iteration: Int,
-        conversationMode: ConversationMode,
-        responseMode: ResponseMode,
+        settings: GenerationSettings,
         error: Throwable?,
     ): JSONObject {
         return JSONObject()
@@ -498,8 +651,12 @@ class LocalHttpServer(
             .put("chunkCount", 0)
             .put("backendStatus", liteRtLmManager.backendStatus())
             .put("speculativeDecodingEnabled", liteRtLmManager.speculativeDecodingEnabled())
-            .put("conversationMode", conversationMode.name)
-            .put("responseMode", responseMode.name)
+            .put("sessionProfile", settings.sessionProfile.name)
+            .put("conversationMode", settings.conversationMode.name)
+            .put("responseMode", settings.responseMode.name)
+            .put("effectiveConversationMode", settings.conversationMode.name)
+            .put("effectiveResponseMode", settings.responseMode.name)
+            .put("resetPolicy", settings.resetPolicy.name)
             .put("error", error?.message ?: "Benchmark setup failed")
     }
 
@@ -552,6 +709,10 @@ class LocalHttpServer(
     private fun parseConversationMode(value: String): ConversationMode? = runCatching { ConversationMode.valueOf(value) }.getOrNull()
 
     private fun parseResponseMode(value: String): ResponseMode? = runCatching { ResponseMode.valueOf(value) }.getOrNull()
+
+    private fun parseResetPolicy(value: String): ResetPolicy? = runCatching { ResetPolicy.valueOf(value) }.getOrNull()
+
+    private fun parseSessionProfile(value: String): SessionProfile? = runCatching { SessionProfile.valueOf(value) }.getOrNull()
 
     private fun invalidConfigValue(field: String): Response {
         return jsonResponse(

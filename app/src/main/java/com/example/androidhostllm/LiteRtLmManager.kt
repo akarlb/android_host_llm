@@ -28,9 +28,12 @@ class LiteRtLmManager(private val appContext: Context) {
     private var conversation: Conversation? = null
 
     @Volatile private var backendStatus: String = "Not loaded"
-    @Volatile private var responseMode: ResponseMode = ResponseMode.CODING_CONCISE
-    @Volatile private var conversationMode: ConversationMode = ConversationMode.PERSISTENT
+    @Volatile private var sessionProfile: SessionProfile = SessionProfile.CODING
+    @Volatile private var responseMode: ResponseMode = ResponseMode.FAST_PATCH
+    @Volatile private var conversationMode: ConversationMode = ConversationMode.FRESH_PER_REQUEST
+    @Volatile private var resetPolicy: ResetPolicy = ResetPolicy.MANUAL_ONLY
     @Volatile private var generationTimeoutSeconds: Int = DEFAULT_GENERATION_TIMEOUT_SECONDS
+    @Volatile private var completedPersistentRequestsSinceReset: Int = 0
 
     @Volatile private var speculativeDecodingRequested: Boolean = true
     @Volatile private var speculativeDecodingEnabled: Boolean = false
@@ -95,14 +98,14 @@ class LiteRtLmManager(private val appContext: Context) {
         prompt: String,
         conversationModeOverride: ConversationMode? = null,
         responseModeOverride: ResponseMode? = null,
+        settingsOverride: GenerationSettings? = null,
     ): Result<String> = withContext(Dispatchers.IO) {
         mutex.withLock {
+            val settings = effectiveSettings(settingsOverride, conversationModeOverride, responseModeOverride)
             val generationStarted = beginGeneration(streaming = false, job = coroutineContext[Job])
-            val effectiveConversationMode = conversationModeOverride ?: conversationMode
-            val effectiveResponseMode = responseModeOverride ?: responseMode
             runCatching {
-                withTimeout(generationTimeoutSeconds * 1000L) {
-                    val activeConversation = createConversationForRequestLocked(effectiveConversationMode)
+                withTimeout(settings.timeoutSeconds * 1000L) {
+                    val activeConversation = createConversationForRequestLocked(settings)
                     try {
                         val output = activeConversation.sendMessage(prompt).toString()
                         finishGeneration(
@@ -110,17 +113,16 @@ class LiteRtLmManager(private val appContext: Context) {
                             outputChars = output.length,
                             firstChunkAt = System.currentTimeMillis(),
                             chunkCount = if (output.isNotEmpty()) 1 else 0,
-                            effectiveConversationMode = effectiveConversationMode,
-                            effectiveResponseMode = effectiveResponseMode,
+                            settings = settings,
                         )
                         output
                     } finally {
-                        closeRequestConversationIfNeeded(activeConversation, effectiveConversationMode)
+                        closeRequestConversationIfNeeded(activeConversation, settings.conversationMode)
                     }
                 }
             }.recoverCatching { error ->
                 if (error is TimeoutCancellationException) {
-                    throw GenerationTimeoutException(generationTimeoutSeconds)
+                    throw GenerationTimeoutException(settings.timeoutSeconds)
                 }
                 throw error
             }.onFailure {
@@ -129,8 +131,7 @@ class LiteRtLmManager(private val appContext: Context) {
                     outputChars = 0,
                     firstChunkAt = null,
                     chunkCount = 0,
-                    effectiveConversationMode = effectiveConversationMode,
-                    effectiveResponseMode = effectiveResponseMode,
+                    settings = settings,
                     error = it,
                 )
                 recordGenerationError(it)
@@ -143,14 +144,14 @@ class LiteRtLmManager(private val appContext: Context) {
         onChunk: suspend (String) -> Unit,
         conversationModeOverride: ConversationMode? = null,
         responseModeOverride: ResponseMode? = null,
+        settingsOverride: GenerationSettings? = null,
     ): Result<String> = withContext(Dispatchers.IO) {
         mutex.withLock {
+            val settings = effectiveSettings(settingsOverride, conversationModeOverride, responseModeOverride)
             val generationStarted = beginGeneration(streaming = true, job = coroutineContext[Job])
-            val effectiveConversationMode = conversationModeOverride ?: conversationMode
-            val effectiveResponseMode = responseModeOverride ?: responseMode
             runCatching {
-                withTimeout(generationTimeoutSeconds * 1000L) {
-                    val activeConversation = createConversationForRequestLocked(effectiveConversationMode)
+                withTimeout(settings.timeoutSeconds * 1000L) {
+                    val activeConversation = createConversationForRequestLocked(settings)
                     try {
                         val output = StringBuilder()
                         var firstChunkAt: Long? = null
@@ -183,17 +184,16 @@ class LiteRtLmManager(private val appContext: Context) {
                             outputChars = finalOutput.length,
                             firstChunkAt = firstChunkAt,
                             chunkCount = chunkCount,
-                            effectiveConversationMode = effectiveConversationMode,
-                            effectiveResponseMode = effectiveResponseMode,
+                            settings = settings,
                         )
                         finalOutput
                     } finally {
-                        closeRequestConversationIfNeeded(activeConversation, effectiveConversationMode)
+                        closeRequestConversationIfNeeded(activeConversation, settings.conversationMode)
                     }
                 }
             }.recoverCatching { error ->
                 if (error is TimeoutCancellationException) {
-                    throw GenerationTimeoutException(generationTimeoutSeconds)
+                    throw GenerationTimeoutException(settings.timeoutSeconds)
                 }
                 throw error
             }.onFailure {
@@ -202,8 +202,7 @@ class LiteRtLmManager(private val appContext: Context) {
                     outputChars = 0,
                     firstChunkAt = null,
                     chunkCount = 0,
-                    effectiveConversationMode = effectiveConversationMode,
-                    effectiveResponseMode = effectiveResponseMode,
+                    settings = settings,
                     error = it,
                 )
                 recordGenerationError(it)
@@ -219,6 +218,32 @@ class LiteRtLmManager(private val appContext: Context) {
 
     fun backendStatus(): String = backendStatus
 
+    fun setSessionProfile(value: SessionProfile) {
+        sessionProfile = value
+    }
+
+    fun sessionProfile(): SessionProfile = sessionProfile
+
+    suspend fun applyGenerationSettings(settings: GenerationSettings): Result<Unit> {
+        val conversationResult = setConversationMode(settings.conversationMode)
+        if (conversationResult.isFailure) return conversationResult
+        setSessionProfile(settings.sessionProfile)
+        setResponseMode(settings.responseMode)
+        setResetPolicy(settings.resetPolicy)
+        setGenerationTimeoutSeconds(settings.timeoutSeconds)
+        setSpeculativeDecodingRequested(settings.speculativeDecodingRequested)
+        return Result.success(Unit)
+    }
+
+    fun applyGenerationSettingsPreference(settings: GenerationSettings) {
+        setSessionProfile(settings.sessionProfile)
+        setResponseMode(settings.responseMode)
+        setResetPolicy(settings.resetPolicy)
+        setGenerationTimeoutSeconds(settings.timeoutSeconds)
+        setSpeculativeDecodingRequested(settings.speculativeDecodingRequested)
+        setConversationModePreference(settings.conversationMode)
+    }
+
     fun setResponseMode(value: ResponseMode) {
         responseMode = value
     }
@@ -233,6 +258,7 @@ class LiteRtLmManager(private val appContext: Context) {
             runCatching {
                 if (activeGeneration) error("Cannot change conversation mode while generation is active")
                 conversationMode = value
+                completedPersistentRequestsSinceReset = 0
                 when (value) {
                     ConversationMode.PERSISTENT -> {
                         val activeEngine = engine
@@ -257,6 +283,12 @@ class LiteRtLmManager(private val appContext: Context) {
     }
 
     fun conversationMode(): ConversationMode = conversationMode
+
+    fun setResetPolicy(value: ResetPolicy) {
+        resetPolicy = value
+    }
+
+    fun resetPolicy(): ResetPolicy = resetPolicy
 
     fun setSpeculativeDecodingRequested(value: Boolean) {
         speculativeDecodingRequested = value
@@ -298,10 +330,12 @@ class LiteRtLmManager(private val appContext: Context) {
                     ConversationMode.PERSISTENT -> {
                         closeConversationLocked()
                         conversation = activeEngine.createConversation()
+                        completedPersistentRequestsSinceReset = 0
                         "Conversation reset"
                     }
                     ConversationMode.FRESH_PER_REQUEST -> {
                         closeConversationLocked()
+                        completedPersistentRequestsSinceReset = 0
                         "Fresh-per-request conversation state cleared"
                     }
                 }
@@ -313,6 +347,7 @@ class LiteRtLmManager(private val appContext: Context) {
 
     fun applyResponseModeHint(prompt: String, mode: ResponseMode = responseMode): String {
         val instruction = when (mode) {
+            ResponseMode.FAST_PATCH -> "You are assisting with coding. Prioritize speed and directness. Give the exact fix, command, or patch first. Avoid background explanation unless essential. Prefer at most 5 bullets. If code is needed, provide only the minimal relevant snippet or diff. Do not restate the problem."
             ResponseMode.CODING_CONCISE -> "You are assisting with coding. Be direct. Prefer concise, actionable answers. Avoid long explanations unless asked. When giving code, prioritize the exact patch or command."
             ResponseMode.BALANCED -> "Answer clearly and directly."
             ResponseMode.DETAILED -> "Answer thoroughly when useful."
@@ -369,7 +404,10 @@ class LiteRtLmManager(private val appContext: Context) {
             appendLine("Last chars/sec: ${String.format(Locale.US, "%.1f", snapshot.lastApproxCharsPerSecond)}")
             appendLine("Last chunk count: ${snapshot.lastChunkCount}")
             appendLine("Total requests / errors: ${snapshot.totalRequests} / ${snapshot.totalErrors}")
+            appendLine("Profile: ${sessionProfile.displayName}")
             appendLine("Conversation mode: ${snapshot.conversationMode.displayName}")
+            appendLine("Response mode: ${responseMode.displayName}")
+            appendLine("Reset policy: ${resetPolicy.displayName}")
             appendLine("Conversation active: ${if (snapshot.conversationActive) "yes" else "no"}")
             appendLine("Active generation: ${if (snapshot.activeGeneration) "yes" else "no"}")
         }
@@ -448,8 +486,7 @@ class LiteRtLmManager(private val appContext: Context) {
         outputChars: Int,
         firstChunkAt: Long?,
         chunkCount: Int,
-        effectiveConversationMode: ConversationMode,
-        effectiveResponseMode: ResponseMode,
+        settings: GenerationSettings,
         error: Throwable? = null,
     ) {
         val duration = System.currentTimeMillis() - startedAt
@@ -469,11 +506,16 @@ class LiteRtLmManager(private val appContext: Context) {
                 chunkCount = lastChunkCount,
                 backendStatus = backendStatus,
                 speculativeDecodingEnabled = speculativeDecodingEnabled,
-                conversationMode = effectiveConversationMode,
-                responseMode = effectiveResponseMode,
+                conversationMode = settings.conversationMode,
+                responseMode = settings.responseMode,
+                resetPolicy = settings.resetPolicy,
+                sessionProfile = settings.sessionProfile,
                 error = error?.let { shortMessage(it) },
             )
         )
+        if (settings.conversationMode == ConversationMode.PERSISTENT) {
+            completedPersistentRequestsSinceReset += 1
+        }
         activeGeneration = false
         currentGenerationJob = null
     }
@@ -485,16 +527,49 @@ class LiteRtLmManager(private val appContext: Context) {
         currentGenerationJob = null
     }
 
-    private fun createConversationForRequestLocked(effectiveConversationMode: ConversationMode): Conversation {
-        return when (effectiveConversationMode) {
+    private fun effectiveSettings(
+        settingsOverride: GenerationSettings?,
+        conversationModeOverride: ConversationMode?,
+        responseModeOverride: ResponseMode?,
+    ): GenerationSettings {
+        val base = settingsOverride ?: GenerationSettings(
+            sessionProfile = sessionProfile,
+            responseMode = responseMode,
+            conversationMode = conversationMode,
+            resetPolicy = resetPolicy,
+            timeoutSeconds = generationTimeoutSeconds,
+            speculativeDecodingRequested = speculativeDecodingRequested,
+        )
+        return base.copy(
+            conversationMode = conversationModeOverride ?: base.conversationMode,
+            responseMode = responseModeOverride ?: base.responseMode,
+        )
+    }
+
+    private fun createConversationForRequestLocked(settings: GenerationSettings): Conversation {
+        return when (settings.conversationMode) {
             ConversationMode.PERSISTENT -> {
                 val activeEngine = engine ?: error("Model is not loaded")
+                resetPersistentConversationForPolicyLocked(activeEngine, settings.resetPolicy)
                 conversation ?: activeEngine.createConversation().also { conversation = it }
             }
             ConversationMode.FRESH_PER_REQUEST -> {
                 closeConversationLocked()
                 (engine ?: error("Model is not loaded")).createConversation()
             }
+        }
+    }
+
+    private fun resetPersistentConversationForPolicyLocked(activeEngine: Engine, policy: ResetPolicy) {
+        val shouldReset = when (policy) {
+            ResetPolicy.MANUAL_ONLY -> false
+            ResetPolicy.BEFORE_EACH_REQUEST -> true
+            ResetPolicy.EVERY_5_REQUESTS -> completedPersistentRequestsSinceReset >= 5
+        }
+        if (shouldReset) {
+            closeConversationLocked()
+            conversation = activeEngine.createConversation()
+            completedPersistentRequestsSinceReset = 0
         }
     }
 
@@ -605,6 +680,8 @@ data class PerformanceHistoryEntry(
     val speculativeDecodingEnabled: Boolean,
     val conversationMode: ConversationMode,
     val responseMode: ResponseMode,
+    val resetPolicy: ResetPolicy,
+    val sessionProfile: SessionProfile,
     val error: String?,
 ) {
     fun toJson(): JSONObject {
@@ -620,20 +697,98 @@ data class PerformanceHistoryEntry(
             .put("speculativeDecodingEnabled", speculativeDecodingEnabled)
             .put("conversationMode", conversationMode.name)
             .put("responseMode", responseMode.name)
+            .put("resetPolicy", resetPolicy.name)
+            .put("sessionProfile", sessionProfile.name)
             .put("error", error ?: JSONObject.NULL)
+    }
+}
+
+data class GenerationSettings(
+    val sessionProfile: SessionProfile,
+    val responseMode: ResponseMode,
+    val conversationMode: ConversationMode,
+    val resetPolicy: ResetPolicy,
+    val timeoutSeconds: Int,
+    val speculativeDecodingRequested: Boolean,
+)
+
+enum class SessionProfile(val displayName: String, val summary: String) {
+    CODING("Coding", "Coding: fast patch answers, fresh request sessions, short direct output."),
+    CONVERSATION("Conversation", "Conversation: persistent chat memory, balanced natural replies."),
+    CUSTOM("Custom", "Custom: manually controlled advanced generation settings.");
+
+    companion object {
+        fun fromDisplayName(displayName: String): SessionProfile {
+            return entries.firstOrNull { it.displayName == displayName } ?: CODING
+        }
+    }
+}
+
+enum class ResetPolicy(val displayName: String) {
+    MANUAL_ONLY("Manual only"),
+    BEFORE_EACH_REQUEST("Before each request"),
+    EVERY_5_REQUESTS("Every 5 requests");
+
+    companion object {
+        fun fromDisplayName(displayName: String): ResetPolicy {
+            return entries.firstOrNull { it.displayName == displayName } ?: MANUAL_ONLY
+        }
+    }
+}
+
+object SessionProfilePresets {
+    fun settingsFor(profile: SessionProfile, custom: GenerationSettings? = null): GenerationSettings {
+        return when (profile) {
+            SessionProfile.CODING -> GenerationSettings(
+                sessionProfile = SessionProfile.CODING,
+                responseMode = ResponseMode.FAST_PATCH,
+                conversationMode = ConversationMode.FRESH_PER_REQUEST,
+                resetPolicy = ResetPolicy.MANUAL_ONLY,
+                timeoutSeconds = 180,
+                speculativeDecodingRequested = true,
+            )
+            SessionProfile.CONVERSATION -> GenerationSettings(
+                sessionProfile = SessionProfile.CONVERSATION,
+                responseMode = ResponseMode.BALANCED,
+                conversationMode = ConversationMode.PERSISTENT,
+                resetPolicy = ResetPolicy.MANUAL_ONLY,
+                timeoutSeconds = 240,
+                speculativeDecodingRequested = true,
+            )
+            SessionProfile.CUSTOM -> custom ?: settingsFor(SessionProfile.CODING).copy(sessionProfile = SessionProfile.CUSTOM)
+        }
+    }
+
+    fun matchingProfile(settings: GenerationSettings): SessionProfile {
+        val coding = settingsFor(SessionProfile.CODING)
+        val conversation = settingsFor(SessionProfile.CONVERSATION)
+        return when {
+            settings.matchesProfile(coding) -> SessionProfile.CODING
+            settings.matchesProfile(conversation) -> SessionProfile.CONVERSATION
+            else -> SessionProfile.CUSTOM
+        }
+    }
+
+    private fun GenerationSettings.matchesProfile(other: GenerationSettings): Boolean {
+        return responseMode == other.responseMode &&
+            conversationMode == other.conversationMode &&
+            resetPolicy == other.resetPolicy &&
+            timeoutSeconds == other.timeoutSeconds &&
+            speculativeDecodingRequested == other.speculativeDecodingRequested
     }
 }
 
 class GenerationTimeoutException(timeoutSeconds: Int) : Exception("Generation timed out after $timeoutSeconds seconds")
 
 enum class ResponseMode(val displayName: String) {
+    FAST_PATCH("Fast patch"),
     CODING_CONCISE("Coding concise"),
     BALANCED("Balanced"),
     DETAILED("Detailed");
 
     companion object {
         fun fromDisplayName(displayName: String): ResponseMode {
-            return entries.firstOrNull { it.displayName == displayName } ?: CODING_CONCISE
+            return entries.firstOrNull { it.displayName == displayName } ?: FAST_PATCH
         }
     }
 }

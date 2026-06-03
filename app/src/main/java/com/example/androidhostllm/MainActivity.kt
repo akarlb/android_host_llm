@@ -67,11 +67,16 @@ class MainActivity : Activity() {
     private lateinit var serverStatusText: TextView
     private lateinit var urlsText: TextView
     private lateinit var apiKeyText: TextView
+    private lateinit var sessionProfileSpinner: Spinner
+    private lateinit var profileSummaryText: TextView
+    private lateinit var advancedGenerationLayout: LinearLayout
     private lateinit var responseModeSpinner: Spinner
     private lateinit var conversationModeSpinner: Spinner
+    private lateinit var resetPolicySpinner: Spinner
     private lateinit var mtpCheckBox: CheckBox
     private lateinit var timeoutField: EditText
     private lateinit var performanceText: TextView
+    private var syncingGenerationControls: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -174,31 +179,53 @@ class MainActivity : Activity() {
         root.addView(loadButton)
 
         root.addView(sectionTitle("3. Generation"))
-        root.addView(bodyText("Tip: For coding speed, use Coding concise mode and reset conversation when responses slow down."))
+        root.addView(TextView(this).apply { text = "Use profile" })
+        sessionProfileSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, SessionProfile.entries.map { it.displayName })
+            setSelection(SessionProfile.entries.indexOf(appPreferences.savedGenerationSettings().sessionProfile).coerceAtLeast(0))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (syncingGenerationControls) return
+                    val profile = SessionProfile.entries.getOrElse(position) { SessionProfile.CODING }
+                    applyProfileSelection(profile)
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        root.addView(sessionProfileSpinner)
+        profileSummaryText = bodyText("")
+        root.addView(profileSummaryText)
+
+        advancedGenerationLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        advancedGenerationLayout.addView(bodyText("Advanced/custom controls"))
         mtpCheckBox = CheckBox(this).apply {
             text = "Enable GPU MTP / speculative decoding"
             isChecked = appPreferences.savedSpeculativeDecodingRequested()
             setOnCheckedChangeListener { _, checked ->
+                if (syncingGenerationControls) return@setOnCheckedChangeListener
                 liteRtLmManager.setSpeculativeDecodingRequested(checked)
-                appPreferences.saveSpeculativeDecodingRequested(checked)
+                persistAdvancedGenerationSettings()
                 progressText.text = "MTP setting saved. Reload the model for this to take effect."
                 refreshUi()
             }
         }
-        root.addView(mtpCheckBox)
-        root.addView(bodyText("Changing MTP requires model reload. CPU fallback does not enable MTP."))
-        root.addView(TextView(this).apply { text = "Conversation mode" })
+        advancedGenerationLayout.addView(mtpCheckBox)
+        advancedGenerationLayout.addView(bodyText("Changing MTP requires model reload. CPU fallback does not enable MTP."))
+        advancedGenerationLayout.addView(TextView(this).apply { text = "Conversation mode" })
         conversationModeSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, ConversationMode.entries.map { it.displayName })
             setSelection(ConversationMode.entries.indexOf(appPreferences.savedConversationMode()).coerceAtLeast(0))
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (syncingGenerationControls) return
                     val value = ConversationMode.entries.getOrElse(position) { ConversationMode.PERSISTENT }
                     activityScope.launch {
                         val result = liteRtLmManager.setConversationMode(value)
                         result.fold(
                             onSuccess = {
-                                appPreferences.saveConversationMode(value)
+                                persistAdvancedGenerationSettings()
                                 progressText.text = "Conversation mode: ${value.displayName}"
                             },
                             onFailure = {
@@ -211,23 +238,40 @@ class MainActivity : Activity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(conversationModeSpinner)
-        root.addView(TextView(this).apply { text = "Response mode" })
+        advancedGenerationLayout.addView(conversationModeSpinner)
+        advancedGenerationLayout.addView(TextView(this).apply { text = "Response mode" })
         responseModeSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, ResponseMode.entries.map { it.displayName })
             setSelection(ResponseMode.entries.indexOf(appPreferences.savedResponseMode()).coerceAtLeast(0))
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    val value = ResponseMode.entries.getOrElse(position) { ResponseMode.CODING_CONCISE }
+                    if (syncingGenerationControls) return
+                    val value = ResponseMode.entries.getOrElse(position) { ResponseMode.FAST_PATCH }
                     liteRtLmManager.setResponseMode(value)
-                    appPreferences.saveResponseMode(value)
+                    persistAdvancedGenerationSettings()
                     refreshUi()
                 }
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(responseModeSpinner)
-        root.addView(TextView(this).apply { text = "Generation timeout seconds" })
+        advancedGenerationLayout.addView(responseModeSpinner)
+        advancedGenerationLayout.addView(TextView(this).apply { text = "Reset policy" })
+        resetPolicySpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, ResetPolicy.entries.map { it.displayName })
+            setSelection(ResetPolicy.entries.indexOf(appPreferences.savedResetPolicy()).coerceAtLeast(0))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (syncingGenerationControls) return
+                    val value = ResetPolicy.entries.getOrElse(position) { ResetPolicy.MANUAL_ONLY }
+                    liteRtLmManager.setResetPolicy(value)
+                    persistAdvancedGenerationSettings()
+                    refreshUi()
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        advancedGenerationLayout.addView(resetPolicySpinner)
+        advancedGenerationLayout.addView(TextView(this).apply { text = "Generation timeout seconds" })
         timeoutField = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             setSingleLine(true)
@@ -236,14 +280,16 @@ class MainActivity : Activity() {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
                 override fun afterTextChanged(s: Editable?) {
+                    if (syncingGenerationControls) return
                     val value = s?.toString()?.toIntOrNull() ?: return
                     val coerced = value.coerceIn(10, 600)
                     liteRtLmManager.setGenerationTimeoutSeconds(coerced)
-                    appPreferences.saveGenerationTimeoutSeconds(coerced)
+                    persistAdvancedGenerationSettings()
                 }
             })
         }
-        root.addView(timeoutField)
+        advancedGenerationLayout.addView(timeoutField)
+        root.addView(advancedGenerationLayout)
         root.addView(Button(this).apply { text = "Reset Conversation"; setOnClickListener { resetConversation() } })
         root.addView(Button(this).apply { text = "Cancel Current Generation"; setOnClickListener { cancelCurrentGeneration() } })
         performanceText = bodyText("")
@@ -281,10 +327,65 @@ class MainActivity : Activity() {
     private fun bodyText(textValue: String) = TextView(this).apply { text = textValue; textSize = 15f }
 
     private fun applySavedGenerationSettings() {
-        liteRtLmManager.setResponseMode(appPreferences.savedResponseMode())
-        liteRtLmManager.setConversationModePreference(appPreferences.savedConversationMode())
-        liteRtLmManager.setSpeculativeDecodingRequested(appPreferences.savedSpeculativeDecodingRequested())
-        liteRtLmManager.setGenerationTimeoutSeconds(appPreferences.savedGenerationTimeoutSeconds())
+        liteRtLmManager.applyGenerationSettingsPreference(appPreferences.savedGenerationSettings())
+    }
+
+    private fun applyProfileSelection(profile: SessionProfile) {
+        if (profile == SessionProfile.CUSTOM) {
+            val customSettings = currentUiGenerationSettings().copy(sessionProfile = SessionProfile.CUSTOM)
+            liteRtLmManager.setSessionProfile(SessionProfile.CUSTOM)
+            appPreferences.saveGenerationSettings(customSettings)
+            refreshUi()
+            return
+        }
+        val settings = SessionProfilePresets.settingsFor(profile)
+        activityScope.launch {
+            val result = liteRtLmManager.applyGenerationSettings(settings)
+            result.fold(
+                onSuccess = {
+                    appPreferences.saveGenerationSettings(settings)
+                    progressText.text = "Profile: ${profile.displayName}"
+                },
+                onFailure = {
+                    progressText.text = it.message ?: "Could not change profile"
+                }
+            )
+            refreshUi()
+        }
+    }
+
+    private fun persistAdvancedGenerationSettings() {
+        val settings = currentUiGenerationSettings()
+        val profile = SessionProfilePresets.matchingProfile(settings)
+        val effective = settings.copy(sessionProfile = profile)
+        liteRtLmManager.setSessionProfile(profile)
+        appPreferences.saveGenerationSettings(effective)
+    }
+
+    private fun currentUiGenerationSettings(): GenerationSettings {
+        val responseMode = ResponseMode.entries.getOrElse(
+            if (::responseModeSpinner.isInitialized) responseModeSpinner.selectedItemPosition else -1
+        ) { liteRtLmManager.responseMode() }
+        val conversationMode = ConversationMode.entries.getOrElse(
+            if (::conversationModeSpinner.isInitialized) conversationModeSpinner.selectedItemPosition else -1
+        ) { liteRtLmManager.conversationMode() }
+        val resetPolicy = ResetPolicy.entries.getOrElse(
+            if (::resetPolicySpinner.isInitialized) resetPolicySpinner.selectedItemPosition else -1
+        ) { liteRtLmManager.resetPolicy() }
+        val timeoutSeconds = if (::timeoutField.isInitialized) {
+            timeoutField.text.toString().toIntOrNull()?.coerceIn(10, 600) ?: liteRtLmManager.generationTimeoutSeconds()
+        } else {
+            liteRtLmManager.generationTimeoutSeconds()
+        }
+        val mtpRequested = if (::mtpCheckBox.isInitialized) mtpCheckBox.isChecked else liteRtLmManager.speculativeDecodingRequested()
+        return GenerationSettings(
+            sessionProfile = SessionProfile.CUSTOM,
+            responseMode = responseMode,
+            conversationMode = conversationMode,
+            resetPolicy = resetPolicy,
+            timeoutSeconds = timeoutSeconds,
+            speculativeDecodingRequested = mtpRequested,
+        )
     }
 
     private fun updateSelectedPreset(preset: ModelPreset) {
@@ -322,8 +423,10 @@ class MainActivity : Activity() {
         val state = ServerRegistry.state
         serverStatusText.text = buildString {
             appendLine("Server running: ${state.running}; bind: ${state.bindHost}:${state.port}; mode: ${state.mode}; model loaded: ${liteRtLmManager.isLoaded()}")
+            appendLine("Profile: ${liteRtLmManager.sessionProfile().displayName}")
             appendLine("Conversation mode: ${liteRtLmManager.conversationMode().displayName}")
             appendLine("Response mode: ${liteRtLmManager.responseMode().displayName}")
+            appendLine("Reset policy: ${liteRtLmManager.resetPolicy().displayName}")
             appendLine("Timeout: ${liteRtLmManager.generationTimeoutSeconds()}s")
         }
         syncGenerationControls()
@@ -333,6 +436,17 @@ class MainActivity : Activity() {
     }
 
     private fun syncGenerationControls() {
+        syncingGenerationControls = true
+        if (::sessionProfileSpinner.isInitialized) {
+            val index = SessionProfile.entries.indexOf(liteRtLmManager.sessionProfile())
+            if (index >= 0 && sessionProfileSpinner.selectedItemPosition != index) sessionProfileSpinner.setSelection(index)
+        }
+        if (::profileSummaryText.isInitialized) {
+            profileSummaryText.text = liteRtLmManager.sessionProfile().summary
+        }
+        if (::advancedGenerationLayout.isInitialized) {
+            advancedGenerationLayout.visibility = if (liteRtLmManager.sessionProfile() == SessionProfile.CUSTOM) View.VISIBLE else View.GONE
+        }
         if (::conversationModeSpinner.isInitialized) {
             val index = ConversationMode.entries.indexOf(liteRtLmManager.conversationMode())
             if (index >= 0 && conversationModeSpinner.selectedItemPosition != index) conversationModeSpinner.setSelection(index)
@@ -341,6 +455,10 @@ class MainActivity : Activity() {
             val index = ResponseMode.entries.indexOf(liteRtLmManager.responseMode())
             if (index >= 0 && responseModeSpinner.selectedItemPosition != index) responseModeSpinner.setSelection(index)
         }
+        if (::resetPolicySpinner.isInitialized) {
+            val index = ResetPolicy.entries.indexOf(liteRtLmManager.resetPolicy())
+            if (index >= 0 && resetPolicySpinner.selectedItemPosition != index) resetPolicySpinner.setSelection(index)
+        }
         if (::mtpCheckBox.isInitialized && mtpCheckBox.isChecked != liteRtLmManager.speculativeDecodingRequested()) {
             mtpCheckBox.isChecked = liteRtLmManager.speculativeDecodingRequested()
         }
@@ -348,6 +466,7 @@ class MainActivity : Activity() {
             val timeoutText = liteRtLmManager.generationTimeoutSeconds().toString()
             if (timeoutField.text.toString() != timeoutText) timeoutField.setText(timeoutText)
         }
+        syncingGenerationControls = false
     }
 
     private fun confirmAndDownload(forceReplace: Boolean) {
@@ -506,6 +625,8 @@ class MainActivity : Activity() {
         return buildString {
             appendLine("Localhost URL: http://127.0.0.1:$port")
             appendLine("Localhost chat: http://127.0.0.1:$port/v1/chat/completions")
+            appendLine("Localhost coding base: http://127.0.0.1:$port/coding/v1")
+            appendLine("Localhost conversation base: http://127.0.0.1:$port/conversation/v1")
             if (ips.isEmpty()) {
                 appendLine("LAN URL: No LAN IPv4 detected; check Wi-Fi.")
             } else {
@@ -513,6 +634,8 @@ class MainActivity : Activity() {
                     val marker = if (index == 0) "primary" else "candidate"
                     appendLine("LAN URL ($marker): http://$ip:$port")
                     appendLine("LAN chat ($marker): http://$ip:$port/v1/chat/completions")
+                    appendLine("LAN coding base ($marker): http://$ip:$port/coding/v1")
+                    appendLine("LAN conversation base ($marker): http://$ip:$port/conversation/v1")
                 }
             }
         }

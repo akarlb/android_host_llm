@@ -167,13 +167,61 @@ If API-key enforcement is re-enabled in a future build, generation requests can 
 
 Use these settings for Page Assist or another OpenAI-compatible client:
 
-- **Base URL:** `http://<PHONE_IP>:8080/v1`
+- **Base URL:** `http://<PHONE_IP>:8080/coding/v1` for coding tools, or `http://<PHONE_IP>:8080/v1` for compatibility/default config
 - **Model:** `local-litert-lm`
 - **API key:** leave blank, or put any placeholder if the UI requires one, because MVP no-auth mode is the default
 - **Chat endpoint used by clients:** `POST http://<PHONE_IP>:8080/v1/chat/completions`
 - **Models endpoint:** `GET http://<PHONE_IP>:8080/v1/models`
 
 If Page Assist says “Failed to fetch”, open the Chrome extension service worker console and look for CORS, Private Network Access, `404 /v1/models`, or streaming parse errors.
+
+## Profiles: Coding vs Conversation
+
+The server exposes two simple profiles so clients do not need to understand response modes, conversation modes, reset policies, timeouts, or benchmark settings.
+
+Coding client setup:
+
+- **Base URL:** `http://<PHONE_IP>:8080/coding/v1`
+- **Model:** `local-litert-lm`
+- **Use for:** Page Assist, IDE agents, command-line coding clients, and patch/debugging workflows
+
+Conversation setup:
+
+- **Base URL:** `http://<PHONE_IP>:8080/conversation/v1`
+- **Model:** `local-litert-lm`
+- **Use for:** future phone frontend, normal chat, and longer back-and-forth
+
+Compatibility:
+
+```text
+http://<PHONE_IP>:8080/v1
+```
+
+The compatibility `/v1` route remains available and uses the globally selected profile or custom config from the phone UI or `/debug/config`.
+
+Coding:
+
+```sh
+curl -N -X POST "http://<PHONE_IP>:8080/coding/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local-litert-lm","messages":[{"role":"user","content":"Fix this Kotlin unresolved reference error in 5 bullets."}],"stream":true}'
+```
+
+Conversation:
+
+```sh
+curl -N -X POST "http://<PHONE_IP>:8080/conversation/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local-litert-lm","messages":[{"role":"user","content":"Can you explain what unresolved reference means?"}],"stream":true}'
+```
+
+Benchmark:
+
+```sh
+curl -X POST "http://<PHONE_IP>:8080/debug/benchmark" \
+  -H "Content-Type: application/json" \
+  -d '{"sessionProfile":"CODING","prompt":"Explain Kotlin unresolved reference in 3 short bullets.","iterations":3,"stream":true}'
+```
 
 ## Curl examples from another device on the same Wi-Fi/LAN
 
@@ -207,12 +255,12 @@ Get runtime config:
 curl http://<PHONE_IP>:8080/debug/config
 ```
 
-Set concise fresh-per-request mode:
+Set Coding profile:
 
 ```sh
 curl -X POST http://<PHONE_IP>:8080/debug/config \
   -H "Content-Type: application/json" \
-  -d '{"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE","generationTimeoutSeconds":180}'
+  -d '{"sessionProfile":"CODING"}'
 ```
 
 Run benchmark:
@@ -220,7 +268,7 @@ Run benchmark:
 ```sh
 curl -X POST http://<PHONE_IP>:8080/debug/benchmark \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"Explain Kotlin unresolved reference in 3 bullets.","iterations":3,"stream":true,"resetBeforeEach":true,"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE"}'
+  -d '{"sessionProfile":"CODING","prompt":"Explain Kotlin unresolved reference in 3 bullets.","iterations":3,"stream":true}'
 ```
 
 Reset conversation:
@@ -329,20 +377,20 @@ curl http://<PHONE_IP>:8080/debug/config
 ```sh
 curl -X POST http://<PHONE_IP>:8080/debug/config \
   -H "Content-Type: application/json" \
-  -d '{"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE","generationTimeoutSeconds":180}'
+  -d '{"sessionProfile":"CODING"}'
 ```
 
-`POST /debug/config` accepts optional `conversationMode`, `responseMode`, `generationTimeoutSeconds`, and `speculativeDecodingRequested` fields. Conversation and response mode changes apply immediately and are persisted. Conversation mode changes are rejected while generation is active. MTP setting changes are persisted but require a model reload to affect engine initialization.
+`GET /debug/config` includes `sessionProfile`, `effectiveResponseMode`, `effectiveConversationMode`, and `effectiveResetPolicy`. `POST /debug/config` accepts `sessionProfile` (`CODING`, `CONVERSATION`, or `CUSTOM`) plus optional advanced fields: `conversationMode`, `responseMode`, `resetPolicy`, `generationTimeoutSeconds`, and `speculativeDecodingRequested`. Direct advanced changes switch the saved profile to `CUSTOM` unless the resulting settings exactly match a preset. Conversation mode changes are rejected while generation is active. MTP setting changes are persisted but require a model reload to affect engine initialization.
 
 Benchmark:
 
 ```sh
 curl -X POST http://<PHONE_IP>:8080/debug/benchmark \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"Explain Kotlin unresolved reference in 3 bullets.","iterations":3,"stream":true,"resetBeforeEach":true,"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE"}'
+  -d '{"sessionProfile":"CODING","prompt":"Explain Kotlin unresolved reference in 3 bullets.","iterations":3,"stream":true}'
 ```
 
-`POST /debug/benchmark` runs up to 5 sequential iterations using the existing generation path. For `stream:true`, chunks are consumed internally and the endpoint returns a normal JSON summary with per-iteration metrics and averages. Optional benchmark conversation/response modes are temporary for the benchmark request and do not overwrite saved config.
+`GET /debug/benchmark/presets` returns the Coding and Conversation benchmark presets. `POST /debug/benchmark` runs up to 5 sequential iterations using the existing generation path. For `stream:true`, chunks are consumed internally and the endpoint returns a normal JSON summary with per-iteration metrics and averages. Optional benchmark profile, conversation, response, reset-policy, and timeout settings are temporary for the benchmark request and do not overwrite saved config.
 
 Reset the persistent conversation without reloading the model:
 
@@ -368,7 +416,8 @@ For Page Assist and coding clients, use `/debug/benchmark` to compare modes and 
 
 Response modes:
 
-- **Coding concise** is the default. It prepends a short coding-focused instruction that asks for direct, actionable answers and exact patches or commands when code is needed.
+- **Fast patch** is the Coding profile default. It prepends a coding-focused instruction that asks for the exact fix, command, or patch first and limits background explanation.
+- **Coding concise** remains available for custom setups. It asks for direct, actionable answers and exact patches or commands when code is needed.
 - **Balanced** prepends a simple direct-answer instruction.
 - **Detailed** asks for thorough answers when useful.
 
@@ -396,6 +445,6 @@ Performance notes:
 Coding-client recommendations:
 
 - Use `stream=true`.
-- Use **Coding concise** response mode.
+- Use the `/coding/v1` base URL or select the **Coding** profile in the phone UI.
 - Reset conversation when responses slow down or become unstable.
 - Use `/debug/perf` to compare MTP on/off and persistent versus fresh-per-request conversation mode.
