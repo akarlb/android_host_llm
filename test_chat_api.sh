@@ -123,6 +123,7 @@ STREAM_BODY="$(cat "$stream_file")"
 rm -f "$stream_file"
 [[ "$status" == "200" ]] || fail "streaming message returned $status: $STREAM_BODY"
 grep -Fq "data: [DONE]" <<<"$STREAM_BODY" || fail "streaming response did not include [DONE]: $STREAM_BODY"
+grep -Fvq "FAILED_PRECONDITION" <<<"$STREAM_BODY" || fail "streaming response hit LiteRT-LM session precondition: $STREAM_BODY"
 pass "streaming message returns [DONE]"
 
 status="$(request GET "/api/chats/$CHAT_ID" "" "$USER_TOKEN")"

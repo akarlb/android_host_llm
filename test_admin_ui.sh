@@ -68,6 +68,7 @@ assert_html_with_token() {
   local path="$1"
   local token="$2"
   local marker="$3"
+  local expected_status="${4:-200}"
   local response_file
   response_file="$(mktemp)"
   local status
@@ -75,7 +76,7 @@ assert_html_with_token() {
   local body
   body="$(cat "$response_file")"
   rm -f "$response_file"
-  [[ "$status" == "200" ]] || fail "GET $path returned $status: $body"
+  [[ "$status" == "$expected_status" ]] || fail "GET $path returned $status, expected $expected_status: $body"
   grep -Fqi "<!doctype html>" <<<"$body" || fail "GET $path did not return HTML: $body"
   grep -Fq "$marker" <<<"$body" || fail "GET $path did not include marker '$marker'"
   pass "GET $path returns HTML containing $marker"
@@ -122,7 +123,20 @@ grep -Fvq "storage_path" <<<"$RESPONSE_BODY" || fail "admin files leaked storage
 pass "admin can access /api/admin/files without storage paths"
 
 assert_html_with_token /admin "$ADMIN_TOKEN" "admin-dashboard"
-assert_html_with_token /admin "$USER_TOKEN" "Access denied"
+assert_html_with_token /admin "$USER_TOKEN" "Access denied" "403"
+
+admin_unauth_headers="$(mktemp)"
+status="$(curl -sS -o /dev/null -D "$admin_unauth_headers" -w "%{http_code}" "$BASE_URL/admin")"
+if [[ "$status" =~ ^30[0-9]$ ]]; then
+  grep -Fiq "Location: /login" "$admin_unauth_headers" || fail "unauthenticated /admin redirect omitted Location: /login"
+elif [[ "$status" == "401" || "$status" == "403" ]]; then
+  true
+else
+  fail "unauthenticated /admin returned $status"
+fi
+rm -f "$admin_unauth_headers"
+pass "unauthenticated /admin does not serve dashboard"
+
 assert_html_with_token /chat "$USER_TOKEN" "message-form"
 
 status="$(request GET /v1/models)"
