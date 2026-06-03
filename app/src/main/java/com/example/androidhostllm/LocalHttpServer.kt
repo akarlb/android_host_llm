@@ -340,7 +340,24 @@ class LocalHttpServer(
         val token = sessionTokenFromRequest(session)
         val user = authRepository.requireUser(token)
         if (user == null) return redirectResponse("/login")
-        if (user.role != UserRole.ADMIN) return webAssetResponse("admin.html")
+        if (user.role != UserRole.ADMIN) {
+            return newFixedLengthResponse(
+                Response.Status.FORBIDDEN,
+                "text/html",
+                """
+                <!doctype html>
+                <html>
+                  <body>
+                    <h1>Access denied</h1>
+                    <p>Admin access required.</p>
+                    <a href="/chat">Back to chat</a>
+                  </body>
+                </html>
+                """.trimIndent()
+            ).apply {
+                addCorsHeaders()
+            }
+        }
         return webAssetResponse("admin.html")
     }
 

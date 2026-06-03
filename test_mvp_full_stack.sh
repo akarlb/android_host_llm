@@ -181,10 +181,22 @@ pass "admin page returns dashboard HTML"
 
 normal_admin_html="$(mktemp)"
 status="$(curl -sS -o "$normal_admin_html" -w "%{http_code}" -H "Authorization: Bearer $USER_A_TOKEN" "$BASE_URL/admin")"
-[[ "$status" == "200" ]] || fail "GET /admin as normal user returned $status"
+[[ "$status" == "403" ]] || fail "GET /admin as normal user returned $status"
 grep -Fq "Access denied" "$normal_admin_html" || fail "normal user admin HTML omitted access denied marker"
 rm -f "$normal_admin_html"
 pass "normal user sees access denied for /admin"
+
+admin_unauth_headers="$(mktemp)"
+status="$(curl -sS -o /dev/null -D "$admin_unauth_headers" -w "%{http_code}" "$BASE_URL/admin")"
+if [[ "$status" =~ ^30[0-9]$ ]]; then
+  grep -Fiq "Location: /login" "$admin_unauth_headers" || fail "unauthenticated /admin redirect omitted Location: /login"
+elif [[ "$status" == "401" || "$status" == "403" ]]; then
+  true
+else
+  fail "GET /admin unauthenticated returned $status"
+fi
+rm -f "$admin_unauth_headers"
+pass "unauthenticated user cannot access /admin dashboard"
 
 read -r status _ <<<"$(request POST /api/chats '{"title":"MVP full-stack chat","profile":"CONVERSATION"}' "$USER_A_TOKEN")"
 assert_status "$status" "200" "create normal-user chat"
@@ -209,6 +221,7 @@ rm -f "$stream_file"
 [[ "$status" == "200" ]] || fail "streaming app-chat message returned $status"
 grep -Fq "data: [DONE]" <<<"$STREAM_BODY" || fail "streaming app-chat response omitted [DONE]"
 grep -Fvq '"error"' <<<"$STREAM_BODY" || fail "streaming app-chat response included error: $STREAM_BODY"
+grep -Fvq "FAILED_PRECONDITION" <<<"$STREAM_BODY" || fail "streaming app-chat hit LiteRT-LM session precondition: $STREAM_BODY"
 pass "streaming app chat completed in $((end - start)) ms"
 
 read -r status _ <<<"$(request GET "/api/chats/$CHAT_ID" "" "$USER_A_TOKEN")"
@@ -307,6 +320,7 @@ for path in /v1/chat/completions /coding/v1/chat/completions /conversation/v1/ch
   [[ "$status" == "200" ]] || fail "POST $path stream=true returned $status"
   grep -Fq "data: [DONE]" <<<"$body" || fail "POST $path stream=true omitted [DONE]"
   grep -Fvq '"error"' <<<"$body" || fail "POST $path stream=true included error: $body"
+  grep -Fvq "FAILED_PRECONDITION" <<<"$body" || fail "POST $path stream=true hit LiteRT-LM session precondition: $body"
   pass "POST $path stream=true"
 done
 
@@ -335,9 +349,16 @@ fi
 pass "/debug/perf omits token/API key fields"
 
 read -r status _ <<<"$(request POST /debug/benchmark '{"prompt":"Reply with ok.","iterations":1,"stream":true,"resetBeforeEach":true,"conversationMode":"FRESH_PER_REQUEST","responseMode":"CODING_CONCISE"}')"
-assert_status "$status" "200" "POST /debug/benchmark"
-grep -Fq '"results"' <<<"$RESPONSE_BODY" || fail "/debug/benchmark omitted results"
-pass "benchmark returns results"
+assert_status "$status" "200" "POST /debug/benchmark FRESH_PER_REQUEST"
+grep -Fq '"results"' <<<"$RESPONSE_BODY" || fail "/debug/benchmark FRESH_PER_REQUEST omitted results"
+grep -Fvq "FAILED_PRECONDITION" <<<"$RESPONSE_BODY" || fail "/debug/benchmark FRESH_PER_REQUEST hit LiteRT-LM session precondition: $RESPONSE_BODY"
+pass "fresh-per-request benchmark returns results"
+
+read -r status _ <<<"$(request POST /debug/benchmark '{"prompt":"Reply with ok.","iterations":1,"stream":true,"resetBeforeEach":true,"conversationMode":"PERSISTENT","responseMode":"CODING_CONCISE"}')"
+assert_status "$status" "200" "POST /debug/benchmark PERSISTENT"
+grep -Fq '"results"' <<<"$RESPONSE_BODY" || fail "/debug/benchmark PERSISTENT omitted results"
+grep -Fvq "FAILED_PRECONDITION" <<<"$RESPONSE_BODY" || fail "/debug/benchmark PERSISTENT hit LiteRT-LM session precondition: $RESPONSE_BODY"
+pass "persistent benchmark returns results"
 
 {
   echo

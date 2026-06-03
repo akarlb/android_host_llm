@@ -211,7 +211,7 @@ class LiteRtLmManager(private val appContext: Context) {
         }
     }
 
-    fun isLoaded(): Boolean = engine != null && conversation != null
+    fun isLoaded(): Boolean = engine != null
 
     fun backendStatus(): String = backendStatus
 
@@ -222,7 +222,30 @@ class LiteRtLmManager(private val appContext: Context) {
     fun responseMode(): ResponseMode = responseMode
 
     fun setConversationMode(value: ConversationMode) {
+        if (conversationMode == value) return
+
         conversationMode = value
+
+        if (activeGeneration) {
+            return
+        }
+
+        runCatching {
+            when (value) {
+                ConversationMode.PERSISTENT -> {
+                    val activeEngine = engine
+                    if (activeEngine != null && conversation == null) {
+                        conversation = activeEngine.createConversation()
+                    }
+                }
+                ConversationMode.FRESH_PER_REQUEST -> {
+                    conversation?.close()
+                    conversation = null
+                }
+            }
+        }.onFailure {
+            lastErrorShortMessage = shortMessage(it)
+        }
     }
 
     fun conversationMode(): ConversationMode = conversationMode
@@ -264,7 +287,10 @@ class LiteRtLmManager(private val appContext: Context) {
                 if (activeGeneration) error("Cannot reset while generation is active")
                 val activeEngine = engine ?: error("Model is not loaded")
                 conversation?.close()
-                conversation = activeEngine.createConversation()
+                conversation = when (conversationMode) {
+                    ConversationMode.PERSISTENT -> activeEngine.createConversation()
+                    ConversationMode.FRESH_PER_REQUEST -> null
+                }
             }.onFailure {
                 lastErrorShortMessage = shortMessage(it)
             }
@@ -352,7 +378,11 @@ class LiteRtLmManager(private val appContext: Context) {
         )
         newEngine.initialize()
         engine = newEngine
-        conversation = newEngine.createConversation()
+        conversation = if (conversationMode == ConversationMode.PERSISTENT) {
+            newEngine.createConversation()
+        } else {
+            null
+        }
         backendStatus = status
     }
 
@@ -438,15 +468,29 @@ class LiteRtLmManager(private val appContext: Context) {
     }
 
     private fun createConversationForRequestLocked(effectiveConversationMode: ConversationMode): Conversation {
+        val activeEngine = engine ?: error("Model is not loaded")
+
         return when (effectiveConversationMode) {
-            ConversationMode.PERSISTENT -> conversation ?: error("Model is not loaded")
-            ConversationMode.FRESH_PER_REQUEST -> (engine ?: error("Model is not loaded")).createConversation()
+            ConversationMode.PERSISTENT -> {
+                conversation ?: activeEngine.createConversation().also {
+                    conversation = it
+                }
+            }
+            ConversationMode.FRESH_PER_REQUEST -> {
+                conversation?.close()
+                conversation = null
+                activeEngine.createConversation()
+            }
         }
     }
 
     private fun closeRequestConversationIfNeeded(requestConversation: Conversation, effectiveConversationMode: ConversationMode) {
         if (effectiveConversationMode == ConversationMode.FRESH_PER_REQUEST) {
-            requestConversation.close()
+            runCatching { requestConversation.close() }
+
+            if (conversation === requestConversation) {
+                conversation = null
+            }
         }
     }
 

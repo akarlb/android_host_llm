@@ -156,6 +156,7 @@ rm -f "$stream_file"
 [[ "$status" == "200" ]] || fail "streaming context message returned $status: $STREAM_BODY"
 grep -Fq '"context"' <<<"$STREAM_BODY" || fail "streaming response did not include context metadata: $STREAM_BODY"
 grep -Fq "data: [DONE]" <<<"$STREAM_BODY" || fail "streaming response did not include [DONE]: $STREAM_BODY"
+grep -Fvq "FAILED_PRECONDITION" <<<"$STREAM_BODY" || fail "streaming response hit LiteRT-LM session precondition: $STREAM_BODY"
 pass "send streaming message with selected file context"
 
 status="$(request GET "/api/chats/$CHAT_ID" "" "$USER_TOKEN")"
