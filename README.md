@@ -186,6 +186,28 @@ BASE_URL=http://<PHONE_IP>:8080 ./test_auth_foundation.sh
 
 The script prints results and writes Markdown to `results_auth_foundation.md`. Set `RUN_CHAT=0` if the model is not loaded and you only want auth plus lightweight endpoint checks.
 
+## App chat storage API
+
+Authenticated web-app chat routes persist chats and messages in app-private SQLite storage. They use local session auth with `Authorization: Bearer <SESSION_TOKEN>` or the `session` cookie. Users can only access their own chats; archived chats are hidden and return `404`.
+
+Routes:
+
+- `GET /api/chats`
+- `POST /api/chats` with optional `{"title":"New chat","profile":"CONVERSATION"}`
+- `GET /api/chats/{chatId}`
+- `POST /api/chats/{chatId}/messages` with `{"content":"Hello","stream":true,"fileIds":[]}`
+- `DELETE /api/chats/{chatId}`
+
+Valid chat profiles are `CODING`, `CONVERSATION`, and `CUSTOM`. The normal-user default is `CONVERSATION`. Streaming app-chat responses are SSE `data:` events ending with `data: [DONE]`; the assistant message is persisted after generation completes.
+
+To smoke-test the chat API against a running phone server with the model loaded:
+
+```sh
+BASE_URL=http://<PHONE_IP>:8080 ./test_chat_api.sh
+```
+
+The script prints results and writes Markdown to `results_chat_api.md`.
+
 ## Page Assist / OpenAI-compatible clients
 
 Use these settings for Page Assist or another OpenAI-compatible client:

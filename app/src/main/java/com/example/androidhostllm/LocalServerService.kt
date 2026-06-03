@@ -51,6 +51,7 @@ class LocalServerService : Service() {
             liteRtLmManager = ServerRegistry.liteRtLmManager,
             appPreferences = preferences,
             authRepository = AuthRepository(applicationContext),
+            chatRepository = ChatRepository(applicationContext),
             bindHost = bindHost,
             port = port,
             requireApiKey = requireApiKey,
