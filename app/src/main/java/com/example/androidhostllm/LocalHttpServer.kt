@@ -13,6 +13,7 @@ class LocalHttpServer(
     private val liteRtLmManager: LiteRtLmManager,
     private val appPreferences: AppPreferences,
     private val authRepository: AuthRepository,
+    private val chatRepository: ChatRepository,
     private val bindHost: String,
     port: Int,
     private val requireApiKey: Boolean,
@@ -26,6 +27,8 @@ class LocalHttpServer(
         if (session.method == Method.OPTIONS) return corsPreflightResponse()
 
         val path = normalizePath(session.uri.orEmpty())
+        val chatId = chatIdFromPath(path)
+        val messageChatId = chatMessageChatIdFromPath(path)
         return when {
             session.method == Method.GET && path == "/" -> routesResponse(session)
             session.method == Method.GET && path == "/routes" -> routesResponse(session)
@@ -36,6 +39,11 @@ class LocalHttpServer(
             session.method == Method.POST && path == "/auth/login" -> loginResponse(session)
             session.method == Method.POST && path == "/auth/logout" -> logoutResponse(session)
             session.method == Method.GET && path == "/auth/session" -> sessionResponse(session)
+            session.method == Method.GET && path == "/api/chats" -> listChatsResponse(session)
+            session.method == Method.POST && path == "/api/chats" -> createChatResponse(session)
+            session.method == Method.GET && chatId != null -> getChatResponse(session, chatId)
+            session.method == Method.POST && messageChatId != null -> createMessageResponse(session, messageChatId)
+            session.method == Method.DELETE && chatId != null -> deleteChatResponse(session, chatId)
             session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse()
             session.method == Method.GET && path == "/debug/perf" -> performanceResponse()
             session.method == Method.GET && path == "/debug/perf/history" -> performanceHistoryResponse()
@@ -44,7 +52,11 @@ class LocalHttpServer(
             session.method == Method.POST && path == "/debug/benchmark" -> benchmarkResponse(session)
             session.method == Method.POST && path == "/v1/conversation/reset" -> resetConversationResponse(session)
             session.method == Method.POST && path == "/v1/chat/completions" -> chatCompletionResponse(session)
+            session.method == Method.POST && path == "/coding/v1/chat/completions" -> chatCompletionResponse(session, responseModeOverride = ResponseMode.CODING_CONCISE)
+            session.method == Method.POST && path == "/conversation/v1/chat/completions" -> chatCompletionResponse(session, responseModeOverride = ResponseMode.BALANCED)
             session.method == Method.GET && path == "/v1/chat/completions" -> methodNotAllowedResponse()
+            session.method == Method.GET && path == "/coding/v1/chat/completions" -> methodNotAllowedResponse()
+            session.method == Method.GET && path == "/conversation/v1/chat/completions" -> methodNotAllowedResponse()
             else -> jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
         }
     }
@@ -64,6 +76,16 @@ class LocalHttpServer(
         return if (withLeadingSlash.length > 1) withLeadingSlash.trimEnd('/') else "/"
     }
 
+    private fun chatIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 3 && parts[0] == "api" && parts[1] == "chats") parts[2] else null
+    }
+
+    private fun chatMessageChatIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 4 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "messages") parts[2] else null
+    }
+
     private fun routesResponse(session: IHTTPSession): Response {
         return jsonResponse(Response.Status.OK, routeHelpJson(session))
     }
@@ -79,11 +101,16 @@ class LocalHttpServer(
                 JSONObject()
                     .put("health", "GET /health")
                     .put("models", "GET /v1/models")
-                    .put("chat", "POST /v1/chat/completions")
+                    .put("chatCompletions", "POST /v1/chat/completions")
+                    .put("codingChat", "POST /coding/v1/chat/completions")
+                    .put("conversationChat", "POST /conversation/v1/chat/completions")
                     .put("register", "POST /auth/register")
                     .put("login", "POST /auth/login")
                     .put("logout", "POST /auth/logout")
                     .put("session", "GET /auth/session")
+                    .put("chats", "GET/POST /api/chats")
+                    .put("chatDetail", "GET/DELETE /api/chats/{chatId}")
+                    .put("chatMessages", "POST /api/chats/{chatId}/messages")
                     .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
                     .put("performanceHistory", "GET /debug/perf/history")
@@ -134,6 +161,11 @@ class LocalHttpServer(
                 .put("authLoginEndpoint", "POST /auth/login")
                 .put("authLogoutEndpoint", "POST /auth/logout")
                 .put("authSessionEndpoint", "GET /auth/session")
+                .put("chatListEndpoint", "GET /api/chats")
+                .put("chatCreateEndpoint", "POST /api/chats")
+                .put("chatDetailEndpoint", "GET /api/chats/{chatId}")
+                .put("chatMessageEndpoint", "POST /api/chats/{chatId}/messages")
+                .put("chatDeleteEndpoint", "DELETE /api/chats/{chatId}")
                 .put("streamingCompat", true)
                 .put("streamingIncremental", true)
                 .put("resetConversationEndpoint", "POST /v1/conversation/reset")
@@ -224,6 +256,116 @@ class LocalHttpServer(
                 .put("authenticated", true)
                 .put("user", userJson(user))
         )
+    }
+
+    private fun listChatsResponse(session: IHTTPSession): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val chats = JSONArray()
+        chatRepository.listChats(user.id).forEach { chats.put(chatJson(it)) }
+        return jsonResponse(Response.Status.OK, JSONObject().put("chats", chats))
+    }
+
+    private fun createChatResponse(session: IHTTPSession): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val body = readBody(session)
+        val requestJson = if (body.isBlank()) {
+            JSONObject()
+        } else {
+            try {
+                JSONObject(body)
+            } catch (_: JSONException) {
+                return jsonResponse(
+                    Response.Status.BAD_REQUEST,
+                    JSONObject().put("error", "Malformed JSON or missing JSON body")
+                )
+            }
+        }
+        val profile = if (requestJson.has("profile") && !requestJson.isNull("profile")) {
+            parseChatProfile(requestJson.optString("profile")) ?: return jsonResponse(
+                Response.Status.BAD_REQUEST,
+                JSONObject().put("error", "Invalid profile")
+            )
+        } else {
+            ChatProfile.CONVERSATION
+        }
+        val chat = chatRepository.createChat(
+            userId = user.id,
+            title = if (requestJson.has("title") && !requestJson.isNull("title")) requestJson.optString("title") else null,
+            profile = profile,
+        )
+        return jsonResponse(Response.Status.OK, JSONObject().put("chat", chatJson(chat)))
+    }
+
+    private fun getChatResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        val messages = JSONArray()
+        chatRepository.listMessages(user.id, chatId)?.forEach { messages.put(messageJson(it)) }
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("chat", chatJson(chat))
+                .put("messages", messages)
+        )
+    }
+
+    private fun createMessageResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        val requestJson = readJsonRequest(session) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Malformed JSON or missing JSON body")
+        )
+        val content = requestJson.optString("content").takeIf { it.isNotBlank() } ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "content is required")
+        )
+        if (requestJson.has("fileIds") && !requestJson.isNull("fileIds") && requestJson.optJSONArray("fileIds") == null) {
+            return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "fileIds must be an array"))
+        }
+
+        val userMessage = chatRepository.addMessage(chat.id, "user", content)
+        val messages = chatRepository.listMessages(user.id, chat.id).orEmpty()
+        val prompt = liteRtLmManager.applyResponseModeHint(renderChatPrompt(messages), responseModeForChatProfile(chat.profile))
+        val conversationMode = ConversationMode.FRESH_PER_REQUEST
+        val responseMode = responseModeForChatProfile(chat.profile)
+        return if (requestJson.optBoolean("stream", false)) {
+            streamingAppMessageResponse(chat, userMessage, prompt, conversationMode, responseMode)
+        } else {
+            if (!liteRtLmManager.isLoaded()) {
+                return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, JSONObject().put("error", "Model is not loaded"))
+            }
+            val result = runBlocking {
+                liteRtLmManager.generate(
+                    prompt = prompt,
+                    conversationModeOverride = conversationMode,
+                    responseModeOverride = responseMode,
+                )
+            }
+            result.fold(
+                onSuccess = { output ->
+                    val assistantMessage = chatRepository.addMessage(chat.id, "assistant", output)
+                    jsonResponse(
+                        Response.Status.OK,
+                        JSONObject()
+                            .put("message", messageJson(assistantMessage))
+                            .put("userMessage", messageJson(userMessage))
+                    )
+                },
+                onFailure = { error ->
+                    jsonResponse(
+                        Response.Status.INTERNAL_ERROR,
+                        JSONObject().put("error", "Generation failed: ${error.message}")
+                    )
+                }
+            )
+        }
+    }
+
+    private fun deleteChatResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        if (!chatRepository.archiveChat(user.id, chatId)) return notFoundResponse()
+        return jsonResponse(Response.Status.OK, JSONObject().put("status", "ok"))
     }
 
     private fun configResponse(): Response {
@@ -373,7 +515,10 @@ class LocalHttpServer(
         )
     }
 
-    private fun chatCompletionResponse(session: IHTTPSession): Response {
+    private fun chatCompletionResponse(
+        session: IHTTPSession,
+        responseModeOverride: ResponseMode? = null,
+    ): Response {
         if (!isAuthorized(session)) {
             return jsonResponse(Response.Status.UNAUTHORIZED, JSONObject().put("error", "Unauthorized"))
         }
@@ -409,17 +554,17 @@ class LocalHttpServer(
                 JSONObject().put("error", "Missing prompt or user message content")
             )
         }
-        val promptedWithStyle = liteRtLmManager.applyResponseModeHint(prompt)
+        val promptedWithStyle = liteRtLmManager.applyResponseModeHint(prompt, responseModeOverride ?: liteRtLmManager.responseMode())
 
         val stream = requestJson.optBoolean("stream", false)
         val nowSeconds = System.currentTimeMillis() / 1000
         val completionId = "chatcmpl-local-$nowSeconds"
 
         if (stream) {
-            return streamingChatCompletionResponse(completionId, nowSeconds, promptedWithStyle)
+            return streamingChatCompletionResponse(completionId, nowSeconds, promptedWithStyle, responseModeOverride)
         }
 
-        val result = runBlocking { liteRtLmManager.generate(promptedWithStyle) }
+        val result = runBlocking { liteRtLmManager.generate(promptedWithStyle, responseModeOverride = responseModeOverride) }
         return result.fold(
             onSuccess = { output ->
                 jsonResponse(Response.Status.OK, chatCompletionJson(completionId, nowSeconds, output))
@@ -456,7 +601,12 @@ class LocalHttpServer(
             .put("response", output)
     }
 
-    private fun streamingChatCompletionResponse(completionId: String, created: Long, prompt: String): Response {
+    private fun streamingChatCompletionResponse(
+        completionId: String,
+        created: Long,
+        prompt: String,
+        responseModeOverride: ResponseMode? = null,
+    ): Response {
         val input = PipedInputStream(STREAM_PIPE_BUFFER_BYTES)
         val output = PipedOutputStream(input)
 
@@ -477,6 +627,7 @@ class LocalHttpServer(
                             onChunk = { chunk ->
                                 writeEvent(chatCompletionChunkJson(completionId, created, content = chunk).toString())
                             },
+                            responseModeOverride = responseModeOverride,
                         )
                     }
                     result.fold(
@@ -612,6 +763,10 @@ class LocalHttpServer(
 
     private fun parseResponseMode(value: String): ResponseMode? = runCatching { ResponseMode.valueOf(value) }.getOrNull()
 
+    private fun parseChatProfile(value: String): ChatProfile? = runCatching {
+        ChatProfile.valueOf(value.trim().uppercase(java.util.Locale.US))
+    }.getOrNull()
+
     private fun invalidConfigValue(field: String): Response {
         return jsonResponse(
             Response.Status.BAD_REQUEST,
@@ -649,6 +804,119 @@ class LocalHttpServer(
     private fun streamingErrorJson(error: Throwable): JSONObject {
         return JSONObject()
             .put("error", JSONObject().put("message", "Generation failed: ${error.message}"))
+    }
+
+    private fun streamingAppMessageResponse(
+        chat: ChatRecord,
+        userMessage: MessageRecord,
+        prompt: String,
+        conversationMode: ConversationMode,
+        responseMode: ResponseMode,
+    ): Response {
+        val input = PipedInputStream(STREAM_PIPE_BUFFER_BYTES)
+        val output = PipedOutputStream(input)
+
+        Thread {
+            OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
+                fun writeEvent(payload: String) {
+                    writer.write("data: ")
+                    writer.write(payload)
+                    writer.write("\n\n")
+                    writer.flush()
+                }
+
+                try {
+                    if (!liteRtLmManager.isLoaded()) {
+                        writeEvent(JSONObject().put("error", "Model is not loaded").toString())
+                        writeEvent("[DONE]")
+                        return@use
+                    }
+                    val result = runBlocking {
+                        liteRtLmManager.generateStreaming(
+                            prompt = prompt,
+                            onChunk = { chunk ->
+                                writeEvent(JSONObject().put("content", chunk).toString())
+                            },
+                            conversationModeOverride = conversationMode,
+                            responseModeOverride = responseMode,
+                        )
+                    }
+                    result.fold(
+                        onSuccess = { outputText ->
+                            val assistantMessage = chatRepository.addMessage(chat.id, "assistant", outputText)
+                            writeEvent(JSONObject().put("message", messageJson(assistantMessage)).toString())
+                            writeEvent("[DONE]")
+                        },
+                        onFailure = { error ->
+                            writeEvent(streamingErrorJson(error).toString())
+                            writeEvent("[DONE]")
+                        }
+                    )
+                } catch (_: Throwable) {
+                    // The client may have disconnected; closing the pipe stops the streaming response.
+                }
+            }
+        }.apply {
+            name = "App-Chat-SSE-${userMessage.id}"
+            isDaemon = true
+            start()
+        }
+
+        return newChunkedResponse(Response.Status.OK, "text/event-stream", input).apply {
+            addCorsHeaders()
+            addHeader("Cache-Control", "no-cache")
+            addHeader("Connection", "keep-alive")
+            addHeader("X-Accel-Buffering", "no")
+        }
+    }
+
+    private fun requireAppUser(session: IHTTPSession): AuthUser? {
+        return authRepository.requireUser(sessionTokenFromRequest(session))
+    }
+
+    private fun unauthorizedResponse(): Response {
+        return jsonResponse(Response.Status.UNAUTHORIZED, JSONObject().put("error", "Unauthorized"))
+    }
+
+    private fun notFoundResponse(): Response {
+        return jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
+    }
+
+    private fun chatJson(chat: ChatRecord): JSONObject {
+        return JSONObject()
+            .put("id", chat.id)
+            .put("title", chat.title)
+            .put("profile", chat.profile.name)
+            .put("createdAtMs", chat.createdAtMs)
+            .put("updatedAtMs", chat.updatedAtMs)
+    }
+
+    private fun messageJson(message: MessageRecord): JSONObject {
+        return JSONObject()
+            .put("id", message.id)
+            .put("role", message.role)
+            .put("content", message.content)
+            .put("createdAtMs", message.createdAtMs)
+    }
+
+    private fun responseModeForChatProfile(profile: ChatProfile): ResponseMode {
+        return when (profile) {
+            ChatProfile.CODING -> ResponseMode.CODING_CONCISE
+            ChatProfile.CONVERSATION -> ResponseMode.BALANCED
+            ChatProfile.CUSTOM -> liteRtLmManager.responseMode()
+        }
+    }
+
+    private fun renderChatPrompt(messages: List<MessageRecord>): String {
+        return buildString {
+            appendLine("Continue this chat. Use the prior turns only as context.")
+            messages.takeLast(MAX_PROMPT_MESSAGES).forEach { message ->
+                append(message.role)
+                append(": ")
+                appendLine(message.content)
+            }
+            append("assistant:")
+        }
     }
 
     private fun isAuthorized(session: IHTTPSession): Boolean {
@@ -750,7 +1018,7 @@ class LocalHttpServer(
 
     private fun Response.addCorsHeaders() {
         addHeader("Access-Control-Allow-Origin", "*")
-        addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
         addHeader("Access-Control-Max-Age", "86400")
         addHeader("Access-Control-Allow-Private-Network", "true")
@@ -758,5 +1026,6 @@ class LocalHttpServer(
 
     private companion object {
         const val STREAM_PIPE_BUFFER_BYTES = 64 * 1024
+        const val MAX_PROMPT_MESSAGES = 24
     }
 }
