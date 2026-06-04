@@ -21,15 +21,6 @@
     <aside class="sidebar">
       <button id="new-chat-button" type="button">New chat</button>
       <div id="chat-list" class="chat-list"></div>
-      <section class="files-panel">
-        <div class="panel-heading">
-          <h2>Files</h2>
-          <button id="refresh-files-button" type="button">Refresh</button>
-        </div>
-        <input id="file-upload" type="file" accept=".md,text/markdown,text/plain">
-        <p id="files-error" class="error" role="alert"></p>
-        <div id="file-list" class="file-list"></div>
-      </section>
     </aside>
     <main class="chat-main">
       <div id="messages" class="messages"></div>
@@ -37,9 +28,15 @@
         <div id="selected-files" class="selected-files"></div>
         <p id="context-status" class="context-status" aria-live="polite"></p>
         <div class="composer-row">
+          <label class="attach-button" title="Attach Markdown file">
+            <span aria-hidden="true">+</span>
+            <span class="sr-only">Attach Markdown file</span>
+            <input id="file-upload" type="file" accept=".md,text/markdown,text/plain">
+          </label>
           <textarea id="message-input" rows="3" placeholder="Ask the local model..." required></textarea>
           <button id="send-button" type="submit">Send</button>
         </div>
+        <p id="files-error" class="error" role="alert"></p>
         <p id="chat-error" class="error" role="alert"></p>
       </form>
     </main>

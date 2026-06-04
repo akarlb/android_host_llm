@@ -41,6 +41,8 @@ class LocalHttpServer(
         val path = normalizePath(session.uri.orEmpty())
         val chatId = chatIdFromPath(path)
         val messageChatId = chatMessageChatIdFromPath(path)
+        val chatFilesChatId = chatFilesChatIdFromPath(path)
+        val chatFileAttachment = chatFileAttachmentFromPath(path)
         val fileId = fileIdFromPath(path)
         return when {
             session.method == Method.GET && path == "/" -> webAssetResponse("index.html")
@@ -71,6 +73,13 @@ class LocalHttpServer(
             session.method == Method.POST && path == "/api/chats" -> createChatResponse(session)
             session.method == Method.GET && path == "/api/files" -> listFilesResponse(session)
             session.method == Method.POST && path == "/api/files/upload" -> uploadFileResponse(session)
+            session.method == Method.GET && chatFilesChatId != null -> listChatFilesResponse(session, chatFilesChatId)
+            session.method == Method.POST && chatFilesChatId != null -> attachChatFileResponse(session, chatFilesChatId)
+            session.method == Method.DELETE && chatFileAttachment != null -> detachChatFileResponse(
+                session,
+                chatFileAttachment.first,
+                chatFileAttachment.second,
+            )
             session.method == Method.GET && fileId != null -> getFileResponse(session, fileId)
             session.method == Method.DELETE && fileId != null -> deleteFileResponse(session, fileId)
             session.method == Method.GET && chatId != null -> getChatResponse(session, chatId)
@@ -116,6 +125,20 @@ class LocalHttpServer(
     private fun chatMessageChatIdFromPath(path: String): String? {
         val parts = path.split('/').filter { it.isNotBlank() }
         return if (parts.size == 4 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "messages") parts[2] else null
+    }
+
+    private fun chatFilesChatIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 4 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "files") parts[2] else null
+    }
+
+    private fun chatFileAttachmentFromPath(path: String): Pair<String, String>? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 5 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "files") {
+            parts[2] to parts[4]
+        } else {
+            null
+        }
     }
 
     private fun fileIdFromPath(path: String): String? {
@@ -182,6 +205,8 @@ class LocalHttpServer(
                     .put("chats", "GET/POST /api/chats")
                     .put("chatDetail", "GET/DELETE /api/chats/{chatId}")
                     .put("chatMessages", "POST /api/chats/{chatId}/messages")
+                    .put("chatFiles", "GET/POST /api/chats/{chatId}/files")
+                    .put("chatFileDetail", "DELETE /api/chats/{chatId}/files/{fileId}")
                     .put("files", "GET /api/files")
                     .put("fileUpload", "POST /api/files/upload")
                     .put("fileDetail", "GET/DELETE /api/files/{fileId}")
@@ -473,7 +498,41 @@ class LocalHttpServer(
             JSONObject()
                 .put("chat", chatJson(chat))
                 .put("messages", messages)
+                .put("files", chatFilesJson(user.id, chatId))
         )
+    }
+
+    private fun listChatFilesResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val files = chatRepository.listAttachedFiles(user.id, chatId) ?: return notFoundResponse()
+        val array = JSONArray()
+        files.forEach { array.put(fileJson(it)) }
+        return jsonResponse(Response.Status.OK, JSONObject().put("files", array))
+    }
+
+    private fun attachChatFileResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val requestJson = readJsonRequest(session) ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "Malformed JSON or missing JSON body")
+        )
+        val fileId = requestJson.optString("fileId").trim().takeIf { it.isNotBlank() } ?: return jsonResponse(
+            Response.Status.BAD_REQUEST,
+            JSONObject().put("error", "fileId is required")
+        )
+        if (!chatRepository.attachFile(user.id, chatId, fileId)) return notFoundResponse()
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("fileId", fileId)
+        )
+    }
+
+    private fun detachChatFileResponse(session: IHTTPSession, chatId: String, fileId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        if (!chatRepository.detachFile(user.id, chatId, fileId)) return notFoundResponse()
+        return jsonResponse(Response.Status.OK, JSONObject().put("status", "ok"))
     }
 
     private fun listFilesResponse(session: IHTTPSession): Response {
@@ -557,7 +616,11 @@ class LocalHttpServer(
         if (requestJson.has("fileIds") && !requestJson.isNull("fileIds") && requestJson.optJSONArray("fileIds") == null) {
             return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "fileIds must be an array"))
         }
-        val fileIds = parseFileIds(requestJson)
+        val fileIds = if (requestJson.has("fileIds") && !requestJson.isNull("fileIds")) {
+            parseFileIds(requestJson)
+        } else {
+            chatRepository.listAttachedFileIds(user.id, chat.id) ?: return notFoundResponse()
+        }
         val userMessage = chatRepository.addMessage(chat.id, "user", content)
         val messages = chatRepository.listMessages(user.id, chat.id).orEmpty()
         val conversationMode = ConversationMode.FRESH_PER_REQUEST
@@ -1271,6 +1334,12 @@ class LocalHttpServer(
             .put("sizeBytes", file.sizeBytes)
             .put("chunkCount", file.chunkCount)
             .put("createdAtMs", file.createdAtMs)
+    }
+
+    private fun chatFilesJson(userId: String, chatId: String): JSONArray {
+        val files = JSONArray()
+        chatRepository.listAttachedFiles(userId, chatId).orEmpty().forEach { files.put(fileJson(it)) }
+        return files
     }
 
     private fun adminUserJson(user: AdminUserOverview): JSONObject {
