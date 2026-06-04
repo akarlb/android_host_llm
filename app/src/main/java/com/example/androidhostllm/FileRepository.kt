@@ -193,6 +193,8 @@ class FileRepository(context: Context) {
         val db = database.writableDatabase
         db.beginTransaction()
         try {
+            db.delete("chat_file_attachments", "file_id = ?", arrayOf(fileId))
+            db.delete("chat_file_context_state", "file_id = ?", arrayOf(fileId))
             db.delete("file_chunks", "file_id = ?", arrayOf(fileId))
             val deleted = db.delete("uploaded_files", "id = ? AND user_id = ?", arrayOf(fileId, userId)) > 0
             if (!deleted) return false

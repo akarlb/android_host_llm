@@ -42,6 +42,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         createChatTables(db)
         createFileTables(db)
         createChatFileContextStateTable(db)
+        createChatFileAttachmentTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -53,6 +54,9 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         }
         if (oldVersion < 4) {
             createChatFileContextStateTable(db)
+        }
+        if (oldVersion < 5) {
+            createChatFileAttachmentTable(db)
         }
     }
 
@@ -131,8 +135,24 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         )
     }
 
+    private fun createChatFileAttachmentTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS chat_file_attachments (
+                chat_id TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(chat_id, file_id)
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS chat_file_attachments_user_chat_idx ON chat_file_attachments(user_id, chat_id)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS chat_file_attachments_file_idx ON chat_file_attachments(file_id)")
+    }
+
     private companion object {
         const val DATABASE_NAME = "android_host_llm.db"
-        const val DATABASE_VERSION = 4
+        const val DATABASE_VERSION = 5
     }
 }

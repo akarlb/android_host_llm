@@ -5,8 +5,7 @@
     chats: [],
     currentChatId: null,
     messages: [],
-    files: [],
-    selectedFileIds: new Set(),
+    attachedFiles: [],
     streaming: false,
     contextMessage: "",
   };
@@ -128,7 +127,6 @@
     $("admin-link").hidden = current.user.role !== "ADMIN";
     $("logout-button").addEventListener("click", logout);
     $("new-chat-button").addEventListener("click", createChat);
-    $("refresh-files-button").addEventListener("click", loadFiles);
     $("file-upload").addEventListener("change", uploadFile);
     $("message-form").addEventListener("submit", sendMessage);
     $("message-input").addEventListener("keydown", (event) => {
@@ -137,7 +135,7 @@
         $("message-form").requestSubmit();
       }
     });
-    await Promise.all([loadChats(), loadFiles()]);
+    await loadChats();
     if (!state.currentChatId) await createChat();
   }
 
@@ -214,8 +212,10 @@
     state.currentChatId = chatId;
     const result = await jsonRequest(`/api/chats/${encodeURIComponent(chatId)}`);
     state.messages = result.messages || [];
+    state.attachedFiles = result.files || [];
     renderChats();
     renderMessages();
+    renderSelectedFiles();
   }
 
   function renderChats() {
@@ -234,21 +234,29 @@
   function renderMessages() {
     const list = $("messages");
     list.innerHTML = "";
-    state.messages.forEach((message) => appendMessage(message.role, message.content));
+    state.messages.forEach((message) => appendMessage(message.role, message.content, { final: true }));
     showContextStatus(state.contextMessage);
     list.scrollTop = list.scrollHeight;
   }
 
-  function appendMessage(role, content) {
+  function appendMessage(role, content, options = {}) {
     const el = document.createElement("article");
     el.className = `message ${role}`;
     el.setAttribute("aria-label", role === "user" ? "Your message" : "Assistant response");
     el.innerHTML = `<div class="message-content"></div>`;
     const contentEl = el.querySelector(".message-content");
-    contentEl.textContent = content || "";
+    setMessageContent(contentEl, role, content || "", options.final === true);
     $("messages").appendChild(el);
     $("messages").scrollTop = $("messages").scrollHeight;
     return contentEl;
+  }
+
+  function setMessageContent(contentEl, role, content, final) {
+    if (role === "assistant" && final) {
+      contentEl.innerHTML = renderMarkdown(content);
+    } else {
+      contentEl.textContent = content || "";
+    }
   }
 
   function showTypingIndicator(contentEl) {
@@ -274,7 +282,7 @@
     $("send-button").disabled = true;
     input.setAttribute("aria-busy", "true");
     input.value = "";
-    appendMessage("user", content);
+    appendMessage("user", content, { final: true });
     const assistantContent = appendMessage("assistant", "");
     showTypingIndicator(assistantContent);
     try {
@@ -298,7 +306,7 @@
       body: JSON.stringify({
         content,
         stream: true,
-        fileIds: Array.from(state.selectedFileIds),
+        fileIds: state.attachedFiles.map((file) => file.id),
       }),
     });
     if (!response.ok) {
@@ -323,7 +331,8 @@
           const payload = line.replace(/^data:\s?/, "");
           if (payload === "[DONE]") {
             clearTypingIndicator(assistantContent);
-            if (finalMessage) assistantContent.textContent = finalMessage.content || assistantContent.textContent;
+            const finalContent = finalMessage ? finalMessage.content || assistantContent.textContent : assistantContent.textContent;
+            setMessageContent(assistantContent, "assistant", finalContent, true);
             return;
           }
           const parsed = JSON.parse(payload);
@@ -343,13 +352,14 @@
     }
   }
 
-  async function loadFiles() {
-    const result = await jsonRequest("/api/files");
-    state.files = result.files || [];
-    for (const id of Array.from(state.selectedFileIds)) {
-      if (!state.files.some((file) => file.id === id)) state.selectedFileIds.delete(id);
+  async function loadChatFiles() {
+    if (!state.currentChatId) {
+      state.attachedFiles = [];
+      renderSelectedFiles();
+      return;
     }
-    renderFiles();
+    const result = await jsonRequest(`/api/chats/${encodeURIComponent(state.currentChatId)}/files`);
+    state.attachedFiles = result.files || [];
     renderSelectedFiles();
   }
 
@@ -363,64 +373,49 @@
       return;
     }
     try {
+      if (!state.currentChatId) await createChat();
       const content = await file.text();
-      await jsonRequest("/api/files/upload", {
+      const result = await jsonRequest("/api/files/upload", {
         method: "POST",
         body: JSON.stringify({ filename: file.name, mimeType: file.type || "text/markdown", content }),
       });
+      await jsonRequest(`/api/chats/${encodeURIComponent(state.currentChatId)}/files`, {
+        method: "POST",
+        body: JSON.stringify({ fileId: result.file.id }),
+      });
       $("file-upload").value = "";
-      await loadFiles();
+      await loadChatFiles();
     } catch (error) {
       showError("files-error", error.message);
+    } finally {
+      $("file-upload").value = "";
     }
-  }
-
-  async function deleteFile(fileId) {
-    await jsonRequest(`/api/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
-    state.selectedFileIds.delete(fileId);
-    await loadFiles();
-  }
-
-  function renderFiles() {
-    const list = $("file-list");
-    list.innerHTML = "";
-    state.files.forEach((file) => {
-      const item = document.createElement("label");
-      item.className = "file-item";
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.checked = state.selectedFileIds.has(file.id);
-      checkbox.addEventListener("change", () => {
-        if (checkbox.checked) state.selectedFileIds.add(file.id);
-        else state.selectedFileIds.delete(file.id);
-        renderSelectedFiles();
-      });
-      const detail = document.createElement("span");
-      detail.innerHTML = `<strong>${escapeText(file.originalFilename || file.filename)}</strong><span class="file-meta">${formatBytes(file.sizeBytes)} - ${file.chunkCount || 0} chunks</span>`;
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "file-delete";
-      del.textContent = "Delete";
-      del.addEventListener("click", (event) => {
-        event.preventDefault();
-        deleteFile(file.id).catch((error) => showError("files-error", error.message));
-      });
-      item.append(checkbox, detail, del);
-      list.appendChild(item);
-    });
   }
 
   function renderSelectedFiles() {
     const holder = $("selected-files");
     holder.innerHTML = "";
-    Array.from(state.selectedFileIds).forEach((id) => {
-      const file = state.files.find((candidate) => candidate.id === id);
-      if (!file) return;
-      const chip = document.createElement("span");
+    state.attachedFiles.forEach((file) => {
+      const chip = document.createElement("div");
       chip.className = "file-chip";
-      chip.textContent = file.originalFilename || file.filename;
+      const name = document.createElement("span");
+      name.innerHTML = `<strong>${escapeText(file.originalFilename || file.filename)}</strong> <span>${formatBytes(file.sizeBytes)} - ${file.chunkCount || 0} chunks</span>`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "file-chip-remove";
+      remove.setAttribute("aria-label", `Detach ${file.originalFilename || file.filename}`);
+      remove.textContent = "x";
+      remove.addEventListener("click", () => detachChatFile(file.id).catch((error) => showError("files-error", error.message)));
+      chip.append(name, remove);
       holder.appendChild(chip);
     });
+  }
+
+  async function detachChatFile(fileId) {
+    if (!state.currentChatId) return;
+    await jsonRequest(`/api/chats/${encodeURIComponent(state.currentChatId)}/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+    state.attachedFiles = state.attachedFiles.filter((file) => file.id !== fileId);
+    renderSelectedFiles();
   }
 
   function formatBytes(value) {
@@ -428,6 +423,133 @@
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function renderMarkdown(markdown) {
+    const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+    const html = [];
+    let paragraph = [];
+    let inCodeBlock = false;
+    let codeLanguage = "";
+    let codeLines = [];
+    let listType = null;
+
+    const closeParagraph = () => {
+      if (!paragraph.length) return;
+      html.push(`<p>${formatInlineMarkdown(paragraph.join("\n"))}</p>`);
+      paragraph = [];
+    };
+    const closeList = () => {
+      if (!listType) return;
+      html.push(`</${listType}>`);
+      listType = null;
+    };
+    const closeCodeBlock = () => {
+      html.push(`<pre><code${codeLanguage ? ` class="language-${escapeText(codeLanguage)}"` : ""}>${escapeText(codeLines.join("\n"))}</code></pre>`);
+      inCodeBlock = false;
+      codeLanguage = "";
+      codeLines = [];
+    };
+
+    lines.forEach((line) => {
+      const fence = line.match(/^```([A-Za-z0-9_-]+)?\s*$/);
+      if (fence) {
+        if (inCodeBlock) {
+          closeCodeBlock();
+        } else {
+          closeParagraph();
+          closeList();
+          inCodeBlock = true;
+          codeLanguage = fence[1] || "";
+          codeLines = [];
+        }
+        return;
+      }
+      if (inCodeBlock) {
+        codeLines.push(line);
+        return;
+      }
+
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        closeParagraph();
+        closeList();
+        const level = heading[1].length;
+        html.push(`<h${level}>${formatInlineMarkdown(heading[2].trim())}</h${level}>`);
+        return;
+      }
+
+      const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+      const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
+      if (unordered || ordered) {
+        closeParagraph();
+        const nextType = unordered ? "ul" : "ol";
+        if (listType !== nextType) {
+          closeList();
+          html.push(`<${nextType}>`);
+          listType = nextType;
+        }
+        html.push(`<li>${formatInlineMarkdown((unordered || ordered)[1].trim())}</li>`);
+        return;
+      }
+
+      if (!line.trim()) {
+        closeParagraph();
+        closeList();
+        return;
+      }
+      paragraph.push(line);
+    });
+
+    if (inCodeBlock) closeCodeBlock();
+    closeParagraph();
+    closeList();
+    return html.join("");
+  }
+
+  function formatInlineMarkdown(text) {
+    return String(text || "")
+      .split(/(`[^`]+`)/g)
+      .map((part) => {
+        if (part.startsWith("`") && part.endsWith("`")) {
+          return `<code>${escapeText(part.slice(1, -1))}</code>`;
+        }
+        return formatInlineWithoutCode(part);
+      })
+      .join("");
+  }
+
+  function formatInlineWithoutCode(text) {
+    let html = escapeText(text);
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
+      const safeUrl = sanitizeMarkdownUrl(url);
+      if (!safeUrl) return label;
+      return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    });
+    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    html = html.replace(/(^|[\s(])_([^_\n]+)_/g, "$1<em>$2</em>");
+    return html.replace(/\n/g, "<br>");
+  }
+
+  function sanitizeMarkdownUrl(value) {
+    const decoded = String(value || "")
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, "\"")
+      .replace(/&#39;/g, "'");
+    const trimmed = decoded.trim();
+    if (!trimmed) return null;
+    const lower = trimmed.replace(/[\u0000-\u001f\s]+/g, "").toLowerCase();
+    if (lower.startsWith("javascript:") || lower.startsWith("data:") || lower.startsWith("vbscript:")) return null;
+    if (
+      lower.startsWith("https://") ||
+      lower.startsWith("http://") ||
+      lower.startsWith("mailto:") ||
+      trimmed.startsWith("/") ||
+      trimmed.startsWith("#")
+    ) {
+      return escapeText(trimmed);
+    }
+    return null;
   }
 
   function renderAdminStatus(status) {

@@ -185,6 +185,64 @@ class ChatRepository(context: Context) {
     }
 
     @Synchronized
+    fun listAttachedFiles(userId: String, chatId: String): List<UploadedFileRecord>? {
+        getChat(userId, chatId) ?: return null
+        database.readableDatabase.rawQuery(
+            """
+            SELECT f.id, f.user_id, f.original_filename, f.safe_filename, f.mime_type, f.size_bytes,
+                   f.storage_path, f.created_at_ms, COUNT(c.id) AS chunk_count
+            FROM chat_file_attachments a
+            JOIN uploaded_files f ON f.id = a.file_id AND f.user_id = a.user_id
+            LEFT JOIN file_chunks c ON c.file_id = f.id
+            WHERE a.user_id = ? AND a.chat_id = ?
+            GROUP BY f.id
+            ORDER BY a.created_at_ms ASC
+            """.trimIndent(),
+            arrayOf(userId, chatId)
+        ).use { cursor ->
+            val files = mutableListOf<UploadedFileRecord>()
+            while (cursor.moveToNext()) files += cursor.toUploadedFileRecord()
+            return files
+        }
+    }
+
+    @Synchronized
+    fun listAttachedFileIds(userId: String, chatId: String): List<String>? {
+        return listAttachedFiles(userId, chatId)?.map { it.id }
+    }
+
+    @Synchronized
+    fun attachFile(userId: String, chatId: String, fileId: String): Boolean {
+        getChat(userId, chatId) ?: return false
+        if (!userOwnsFile(userId, fileId)) return false
+        val now = System.currentTimeMillis()
+        database.writableDatabase.insertWithOnConflict(
+            "chat_file_attachments",
+            null,
+            ContentValues().apply {
+                put("chat_id", chatId)
+                put("file_id", fileId)
+                put("user_id", userId)
+                put("created_at_ms", now)
+            },
+            android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE
+        )
+        return true
+    }
+
+    @Synchronized
+    fun detachFile(userId: String, chatId: String, fileId: String): Boolean {
+        getChat(userId, chatId) ?: return false
+        database.writableDatabase.delete(
+            "chat_file_attachments",
+            "chat_id = ? AND file_id = ? AND user_id = ?",
+            arrayOf(chatId, fileId, userId)
+        )
+        resetContextState(chatId, fileId)
+        return true
+    }
+
+    @Synchronized
     fun totalChatCount(): Int {
         database.readableDatabase.rawQuery(
             "SELECT COUNT(*) FROM chats WHERE archived = 0",
@@ -213,5 +271,28 @@ class ChatRepository(context: Context) {
             content = getString(3),
             createdAtMs = getLong(4),
         )
+    }
+
+    private fun android.database.Cursor.toUploadedFileRecord(): UploadedFileRecord {
+        return UploadedFileRecord(
+            id = getString(0),
+            userId = getString(1),
+            originalFilename = getString(2),
+            safeFilename = getString(3),
+            mimeType = getString(4),
+            sizeBytes = getLong(5),
+            storagePath = getString(6),
+            createdAtMs = getLong(7),
+            chunkCount = getInt(8),
+        )
+    }
+
+    private fun userOwnsFile(userId: String, fileId: String): Boolean {
+        database.readableDatabase.rawQuery(
+            "SELECT 1 FROM uploaded_files WHERE id = ? AND user_id = ? LIMIT 1",
+            arrayOf(fileId, userId)
+        ).use { cursor ->
+            return cursor.moveToFirst()
+        }
     }
 }
