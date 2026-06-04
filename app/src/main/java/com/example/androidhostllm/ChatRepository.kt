@@ -139,6 +139,52 @@ class ChatRepository(context: Context) {
     }
 
     @Synchronized
+    fun getContextState(chatId: String, fileId: String): ChatFileContextState? {
+        database.readableDatabase.rawQuery(
+            """
+            SELECT chat_id, file_id, last_included_chunk_index, updated_at_ms
+            FROM chat_file_context_state
+            WHERE chat_id = ? AND file_id = ?
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(chatId, fileId)
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            return ChatFileContextState(
+                chatId = cursor.getString(0),
+                fileId = cursor.getString(1),
+                lastIncludedChunkIndex = cursor.getInt(2),
+                updatedAtMs = cursor.getLong(3),
+            )
+        }
+    }
+
+    @Synchronized
+    fun updateContextState(chatId: String, fileId: String, lastIncludedChunkIndex: Int) {
+        val now = System.currentTimeMillis()
+        database.writableDatabase.insertWithOnConflict(
+            "chat_file_context_state",
+            null,
+            ContentValues().apply {
+                put("chat_id", chatId)
+                put("file_id", fileId)
+                put("last_included_chunk_index", lastIncludedChunkIndex)
+                put("updated_at_ms", now)
+            },
+            android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
+        )
+    }
+
+    @Synchronized
+    fun resetContextState(chatId: String, fileId: String) {
+        database.writableDatabase.delete(
+            "chat_file_context_state",
+            "chat_id = ? AND file_id = ?",
+            arrayOf(chatId, fileId)
+        )
+    }
+
+    @Synchronized
     fun totalChatCount(): Int {
         database.readableDatabase.rawQuery(
             "SELECT COUNT(*) FROM chats WHERE archived = 0",

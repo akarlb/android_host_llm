@@ -44,5 +44,9 @@ data class FileContextBuildResult(
     val fileIds: List<String>,
     val includedChunks: Int,
     val includedChars: Int,
+    val omittedChunks: Int,
     val truncated: Boolean,
+    val continuationMode: Boolean,
+    val message: String?,
+    val lastIncludedChunkIndexes: Map<String, Int>,
 )

@@ -11,6 +11,13 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
+private data class AppPromptPlan(
+    val plan: PromptPlan,
+    val context: FileContextBuildResult?,
+    val fileIds: List<String>,
+    val messages: List<MessageRecord>,
+)
+
 class LocalHttpServer(
     private val appContext: Context,
     private val liteRtLmManager: LiteRtLmManager,
@@ -26,6 +33,7 @@ class LocalHttpServer(
 ) : NanoHTTPD(bindHost, port) {
 
     private val modelId = "local-litert-lm"
+    private val promptBudgetManager = PromptBudgetManager()
 
     override fun serve(session: IHTTPSession): Response {
         if (session.method == Method.OPTIONS) return corsPreflightResponse()
@@ -550,46 +558,59 @@ class LocalHttpServer(
             return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "fileIds must be an array"))
         }
         val fileIds = parseFileIds(requestJson)
-        val context = if (fileIds.isEmpty()) null else {
-            fileRepository.buildContext(user.id, fileIds) ?: return notFoundResponse()
-        }
-
         val userMessage = chatRepository.addMessage(chat.id, "user", content)
         val messages = chatRepository.listMessages(user.id, chat.id).orEmpty()
-        val prompt = liteRtLmManager.applyResponseModeHint(
-            renderChatPrompt(messages, context, userMessage.id),
-            responseModeForChatProfile(chat.profile)
-        )
         val conversationMode = ConversationMode.FRESH_PER_REQUEST
         val responseMode = responseModeForChatProfile(chat.profile)
+        val promptPlan = buildAppPromptPlan(user.id, chat.id, fileIds, messages, userMessage, responseMode, retry = false)
+            ?: return notFoundResponse()
+        val prompt = liteRtLmManager.applyResponseModeHint(promptPlan.plan.finalPrompt, responseMode)
         return if (requestJson.optBoolean("stream", false)) {
-            streamingAppMessageResponse(chat, userMessage, prompt, conversationMode, responseMode, context)
+            streamingAppMessageResponse(chat, userMessage, promptPlan, prompt, conversationMode, responseMode)
         } else {
             if (!liteRtLmManager.isLoaded()) {
                 return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, JSONObject().put("error", "Model is not loaded"))
             }
-            val result = runBlocking {
+            var usedPlan = promptPlan
+            var result = runBlocking {
                 liteRtLmManager.generate(
                     prompt = prompt,
                     conversationModeOverride = conversationMode,
                     responseModeOverride = responseMode,
                 )
             }
+            val firstError = result.exceptionOrNull()
+            if (firstError != null && promptBudgetManager.isTokenOverflow(firstError)) {
+                val retryPlan = buildAppPromptPlan(user.id, chat.id, fileIds, messages, userMessage, responseMode, retry = true)
+                    ?: return notFoundResponse()
+                usedPlan = retryPlan
+                result = runBlocking {
+                    liteRtLmManager.generate(
+                        prompt = liteRtLmManager.applyResponseModeHint(retryPlan.plan.finalPrompt, responseMode),
+                        conversationModeOverride = conversationMode,
+                        responseModeOverride = responseMode,
+                    )
+                }
+            }
             result.fold(
                 onSuccess = { output ->
+                    updateContextState(chat.id, usedPlan.context)
                     val assistantMessage = chatRepository.addMessage(chat.id, "assistant", output)
                     jsonResponse(
                         Response.Status.OK,
                         JSONObject()
                             .put("message", messageJson(assistantMessage))
                             .put("userMessage", messageJson(userMessage))
-                            .put("context", contextJson(context))
+                            .put("context", contextJson(usedPlan.plan.contextMetadata))
                     )
                 },
                 onFailure = { error ->
+                    val friendly = promptBudgetManager.friendlyError(error)
                     jsonResponse(
                         Response.Status.INTERNAL_ERROR,
-                        JSONObject().put("error", "Generation failed: ${error.message}")
+                        JSONObject()
+                            .put("error", friendly.second)
+                            .put("code", friendly.first)
                     )
                 }
             )
@@ -1040,13 +1061,24 @@ class LocalHttpServer(
             .put("error", JSONObject().put("message", "Generation failed: ${error.message}"))
     }
 
+    private fun appStreamingErrorJson(error: Throwable): JSONObject {
+        val friendly = promptBudgetManager.friendlyError(error)
+        return JSONObject()
+            .put(
+                "error",
+                JSONObject()
+                    .put("code", friendly.first)
+                    .put("message", friendly.second)
+            )
+    }
+
     private fun streamingAppMessageResponse(
         chat: ChatRecord,
         userMessage: MessageRecord,
+        promptPlan: AppPromptPlan,
         prompt: String,
         conversationMode: ConversationMode,
         responseMode: ResponseMode,
-        context: FileContextBuildResult?,
     ): Response {
         val input = PipedInputStream(STREAM_PIPE_BUFFER_BYTES)
         val output = PipedOutputStream(input)
@@ -1066,27 +1098,55 @@ class LocalHttpServer(
                         writeEvent("[DONE]")
                         return@use
                     }
-                    if (context != null) {
-                        writeEvent(JSONObject().put("context", contextJson(context)).toString())
-                    }
-                    val result = runBlocking {
+                    writeEvent(JSONObject().put("context", contextJson(promptPlan.plan.contextMetadata)).toString())
+                    var usedPlan = promptPlan
+                    var emittedContent = false
+                    var result = runBlocking {
                         liteRtLmManager.generateStreaming(
                             prompt = prompt,
                             onChunk = { chunk ->
+                                emittedContent = true
                                 writeEvent(JSONObject().put("content", chunk).toString())
                             },
                             conversationModeOverride = conversationMode,
                             responseModeOverride = responseMode,
                         )
                     }
+                    val firstError = result.exceptionOrNull()
+                    if (!emittedContent && firstError != null && promptBudgetManager.isTokenOverflow(firstError)) {
+                        val retryPlan = buildAppPromptPlan(
+                            userId = chat.userId,
+                            chatId = chat.id,
+                            fileIds = promptPlan.fileIds,
+                            messages = promptPlan.messages,
+                            userMessage = userMessage,
+                            responseMode = responseMode,
+                            retry = true,
+                        )
+                        if (retryPlan != null) {
+                            usedPlan = retryPlan
+                            writeEvent(JSONObject().put("context", contextJson(retryPlan.plan.contextMetadata)).toString())
+                            result = runBlocking {
+                                liteRtLmManager.generateStreaming(
+                                    prompt = liteRtLmManager.applyResponseModeHint(retryPlan.plan.finalPrompt, responseMode),
+                                    onChunk = { chunk ->
+                                        writeEvent(JSONObject().put("content", chunk).toString())
+                                    },
+                                    conversationModeOverride = conversationMode,
+                                    responseModeOverride = responseMode,
+                                )
+                            }
+                        }
+                    }
                     result.fold(
                         onSuccess = { outputText ->
+                            updateContextState(chat.id, usedPlan.context)
                             val assistantMessage = chatRepository.addMessage(chat.id, "assistant", outputText)
                             writeEvent(JSONObject().put("message", messageJson(assistantMessage)).toString())
                             writeEvent("[DONE]")
                         },
                         onFailure = { error ->
-                            writeEvent(streamingErrorJson(error).toString())
+                            writeEvent(appStreamingErrorJson(error).toString())
                             writeEvent("[DONE]")
                         }
                     )
@@ -1105,6 +1165,62 @@ class LocalHttpServer(
             addHeader("Cache-Control", "no-cache")
             addHeader("Connection", "keep-alive")
             addHeader("X-Accel-Buffering", "no")
+        }
+    }
+
+    private fun buildAppPromptPlan(
+        userId: String,
+        chatId: String,
+        fileIds: List<String>,
+        messages: List<MessageRecord>,
+        userMessage: MessageRecord,
+        responseMode: ResponseMode,
+        retry: Boolean,
+    ): AppPromptPlan? {
+        val continuationMode = promptBudgetManager.isContinuationRequest(userMessage.content)
+        val state = if (continuationMode) {
+            fileIds.associateWith { fileId -> chatRepository.getContextState(chatId, fileId)?.lastIncludedChunkIndex ?: -1 }
+        } else {
+            emptyMap()
+        }
+        val budget = promptBudgetManager.calculateFileBudget(
+            messages = messages,
+            currentUserMessageId = userMessage.id,
+            selectedFileIds = fileIds,
+            responseMode = responseMode,
+            continuationMode = continuationMode,
+            retry = retry,
+        )
+        val context = if (fileIds.isEmpty()) {
+            null
+        } else {
+            fileRepository.buildContext(
+                userId = userId,
+                fileIds = fileIds,
+                budgetChars = budget,
+                question = userMessage.content,
+                continuationMode = continuationMode,
+                continuationState = state,
+            ) ?: return null
+        }
+        val plan = promptBudgetManager.buildPlan(
+            messages = messages,
+            currentUserMessageId = userMessage.id,
+            context = context,
+            continuationMode = continuationMode,
+            retry = retry,
+        )
+        return AppPromptPlan(
+            plan = plan,
+            context = context,
+            fileIds = fileIds,
+            messages = messages,
+        )
+    }
+
+    private fun updateContextState(chatId: String, context: FileContextBuildResult?) {
+        context?.lastIncludedChunkIndexes?.forEach { (fileId, chunkIndex) ->
+            chatRepository.updateContextState(chatId, fileId, chunkIndex)
         }
     }
 
@@ -1186,18 +1302,36 @@ class LocalHttpServer(
     }
 
     private fun contextJson(context: FileContextBuildResult?): JSONObject {
+        if (context == null) return contextJson(null as PromptContextMetadata?)
+        return JSONObject()
+            .put("fileIds", JSONArray(context.fileIds))
+            .put("includedChunks", context.includedChunks)
+            .put("includedChars", context.includedChars)
+            .put("omittedChunks", context.omittedChunks)
+            .put("truncated", context.truncated)
+            .put("continuationMode", context.continuationMode)
+            .put("message", context.message ?: JSONObject.NULL)
+    }
+
+    private fun contextJson(context: PromptContextMetadata?): JSONObject {
         if (context == null) {
             return JSONObject()
                 .put("fileIds", JSONArray())
                 .put("includedChunks", 0)
                 .put("includedChars", 0)
+                .put("omittedChunks", 0)
                 .put("truncated", false)
+                .put("continuationMode", false)
+                .put("message", JSONObject.NULL)
         }
         return JSONObject()
             .put("fileIds", JSONArray(context.fileIds))
             .put("includedChunks", context.includedChunks)
             .put("includedChars", context.includedChars)
+            .put("omittedChunks", context.omittedChunks)
             .put("truncated", context.truncated)
+            .put("continuationMode", context.continuationMode)
+            .put("message", context.friendlyMessage ?: JSONObject.NULL)
     }
 
     private fun responseModeForChatProfile(profile: ChatProfile): ResponseMode {

@@ -17,6 +17,13 @@ data class MessageRecord(
     val createdAtMs: Long,
 )
 
+data class ChatFileContextState(
+    val chatId: String,
+    val fileId: String,
+    val lastIncludedChunkIndex: Int,
+    val updatedAtMs: Long,
+)
+
 enum class ChatProfile {
     CODING,
     CONVERSATION,
