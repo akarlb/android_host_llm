@@ -41,6 +41,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE INDEX sessions_user_id_idx ON sessions(user_id)")
         createChatTables(db)
         createFileTables(db)
+        createChatFileContextStateTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -49,6 +50,9 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         }
         if (oldVersion < 3) {
             createFileTables(db)
+        }
+        if (oldVersion < 4) {
+            createChatFileContextStateTable(db)
         }
     }
 
@@ -113,8 +117,22 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE INDEX IF NOT EXISTS file_chunks_file_index_idx ON file_chunks(file_id, chunk_index)")
     }
 
+    private fun createChatFileContextStateTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS chat_file_context_state (
+                chat_id TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                last_included_chunk_index INTEGER NOT NULL DEFAULT -1,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(chat_id, file_id)
+            )
+            """.trimIndent()
+        )
+    }
+
     private companion object {
         const val DATABASE_NAME = "android_host_llm.db"
-        const val DATABASE_VERSION = 3
+        const val DATABASE_VERSION = 4
     }
 }

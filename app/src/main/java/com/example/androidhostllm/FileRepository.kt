@@ -205,52 +205,72 @@ class FileRepository(context: Context) {
     }
 
     @Synchronized
-    fun buildContext(userId: String, fileIds: List<String>, budgetChars: Int = CONTEXT_BUDGET_CHARS): FileContextBuildResult? {
+    fun buildContext(
+        userId: String,
+        fileIds: List<String>,
+        budgetChars: Int = CONTEXT_BUDGET_CHARS,
+        question: String = "",
+        continuationMode: Boolean = false,
+        continuationState: Map<String, Int> = emptyMap(),
+    ): FileContextBuildResult? {
         if (fileIds.isEmpty()) return null
         val files = fileIds.map { fileId -> getFile(userId, fileId) ?: return null }
+        val safeBudget = budgetChars.coerceAtLeast(0)
+        val keywords = keywords(question)
         val builder = StringBuilder()
         var includedChunks = 0
         var includedChars = 0
+        var omittedChunks = 0
         var truncated = false
+        val lastIncludedIndexes = linkedMapOf<String, Int>()
 
         builder.appendLine("You may use the following uploaded Markdown context.")
         builder.appendLine()
-        files.forEach { file ->
+        files.forEachIndexed { filePosition, file ->
             val fileHeader = "[File: ${file.safeFilename}]\n"
-            if (includedChars + fileHeader.length > budgetChars) {
+            if (includedChars + fileHeader.length > safeBudget) {
                 truncated = true
-                return@forEach
+                return@forEachIndexed
             }
             builder.append(fileHeader)
             includedChars += fileHeader.length
             val chunks = listChunks(userId, file.id).orEmpty()
-            for (chunk in chunks) {
-                val chunkText = buildString {
-                    append("[Chunk ")
-                    append(chunk.chunkIndex + 1)
-                    if (!chunk.headingPath.isNullOrBlank()) {
-                        append(": ")
-                        append(chunk.headingPath)
-                    }
-                    appendLine("]")
-                    appendLine(chunk.content)
-                    appendLine("[/Chunk]")
-                }
-                if (includedChars + chunkText.length > budgetChars) {
+            val rankedChunks = rankChunks(file, chunks, keywords, continuationMode, continuationState[file.id] ?: -1)
+            var includedForFile = 0
+            var skippedForFile = 0
+            val fileLimit = if (files.size > 1 && filePosition < files.lastIndex) {
+                (includedChars + (safeBudget / files.size).coerceAtLeast(1)).coerceAtMost(safeBudget)
+            } else {
+                safeBudget
+            }
+            for (chunk in rankedChunks) {
+                val chunkText = chunk.promptText()
+                if (includedChars + chunkText.length > safeBudget || includedChars + chunkText.length > fileLimit) {
+                    skippedForFile += 1
                     truncated = true
-                    break
+                    continue
                 }
                 builder.append(chunkText)
                 includedChunks += 1
+                includedForFile += 1
                 includedChars += chunkText.length
+                lastIncludedIndexes[file.id] = maxOf(lastIncludedIndexes[file.id] ?: -1, chunk.chunkIndex)
             }
             val footer = "[/File]\n\n"
-            if (includedChars + footer.length <= budgetChars) {
+            omittedChunks += maxOf(skippedForFile, chunks.size - includedForFile)
+            if (includedChars + footer.length <= safeBudget) {
                 builder.append(footer)
                 includedChars += footer.length
             } else {
                 truncated = true
             }
+        }
+        val uniqueOmittedChunks = omittedChunks.coerceAtLeast(0)
+        val message = when {
+            continuationMode && includedChunks > 0 -> "Continuing with the next available part of the selected file context."
+            continuationMode -> "All available selected file context has already been used. Ask about a specific section to revisit it."
+            truncated -> "Using selected file context. Large files were shortened automatically."
+            else -> null
         }
 
         return FileContextBuildResult(
@@ -258,8 +278,73 @@ class FileRepository(context: Context) {
             fileIds = files.map { it.id },
             includedChunks = includedChunks,
             includedChars = includedChars,
+            omittedChunks = uniqueOmittedChunks,
             truncated = truncated,
+            continuationMode = continuationMode,
+            message = message,
+            lastIncludedChunkIndexes = lastIncludedIndexes,
         )
+    }
+
+    private fun rankChunks(
+        file: UploadedFileRecord,
+        chunks: List<FileChunkRecord>,
+        keywords: Set<String>,
+        continuationMode: Boolean,
+        lastIncludedChunkIndex: Int,
+    ): List<FileChunkRecord> {
+        if (chunks.isEmpty()) return emptyList()
+        val startIndex = if (continuationMode) lastIncludedChunkIndex + 1 else 0
+        val available = if (continuationMode) chunks.filter { it.chunkIndex >= startIndex } else chunks
+        val candidates = available.ifEmpty { chunks }
+        val intro = chunks.firstOrNull()
+        return candidates
+            .sortedWith(
+                compareByDescending<FileChunkRecord> { chunk ->
+                    scoreChunk(file, chunk, keywords, continuationMode, startIndex, intro?.chunkIndex)
+                }.thenBy { it.chunkIndex }
+            )
+    }
+
+    private fun scoreChunk(
+        file: UploadedFileRecord,
+        chunk: FileChunkRecord,
+        keywords: Set<String>,
+        continuationMode: Boolean,
+        startIndex: Int,
+        introIndex: Int?,
+    ): Int {
+        var score = 0
+        val headingWords = keywords(chunk.headingPath.orEmpty())
+        val contentWords = keywords(chunk.content.take(2_000))
+        val filenameWords = keywords(file.safeFilename)
+        score += headingWords.count { it in keywords } * 12
+        score += contentWords.count { it in keywords } * 3
+        score += filenameWords.count { it in keywords } * 8
+        if (continuationMode && chunk.chunkIndex >= startIndex) score += 40 - (chunk.chunkIndex - startIndex).coerceAtLeast(0)
+        if (!continuationMode && chunk.chunkIndex == introIndex) score += 20
+        return score
+    }
+
+    private fun FileChunkRecord.promptText(): String {
+        return buildString {
+            append("[Chunk ")
+            append(chunkIndex + 1)
+            if (!headingPath.isNullOrBlank()) {
+                append(": ")
+                append(headingPath)
+            }
+            appendLine("]")
+            appendLine(content)
+            appendLine("[/Chunk]")
+        }
+    }
+
+    private fun keywords(text: String): Set<String> {
+        return text.lowercase(Locale.US)
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 3 && it !in STOP_WORDS }
+            .toSet()
     }
 
     private fun sanitizeFilename(filename: String): String? {
@@ -305,6 +390,10 @@ class FileRepository(context: Context) {
         const val MAX_UPLOAD_BYTES = 2 * 1024 * 1024
         const val MAX_SAFE_FILENAME_CHARS = 120
         const val CONTEXT_BUDGET_CHARS = 14_000
+        val STOP_WORDS = setOf(
+            "the", "and", "for", "with", "this", "that", "from", "into", "about", "give",
+            "much", "possible", "please", "file", "continue", "answer", "detail", "summary"
+        )
     }
 }
 

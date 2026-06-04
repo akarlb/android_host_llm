@@ -8,6 +8,7 @@
     files: [],
     selectedFileIds: new Set(),
     streaming: false,
+    contextMessage: "",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -51,6 +52,11 @@
 
   function showError(id, message) {
     const el = $(id);
+    if (el) el.textContent = message || "";
+  }
+
+  function showContextStatus(message) {
+    const el = $("context-status");
     if (el) el.textContent = message || "";
   }
 
@@ -125,6 +131,12 @@
     $("refresh-files-button").addEventListener("click", loadFiles);
     $("file-upload").addEventListener("change", uploadFile);
     $("message-form").addEventListener("submit", sendMessage);
+    $("message-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !state.streaming) {
+        event.preventDefault();
+        $("message-form").requestSubmit();
+      }
+    });
     await Promise.all([loadChats(), loadFiles()]);
     if (!state.currentChatId) await createChat();
   }
@@ -223,17 +235,32 @@
     const list = $("messages");
     list.innerHTML = "";
     state.messages.forEach((message) => appendMessage(message.role, message.content));
+    showContextStatus(state.contextMessage);
     list.scrollTop = list.scrollHeight;
   }
 
   function appendMessage(role, content) {
     const el = document.createElement("article");
     el.className = `message ${role}`;
-    el.innerHTML = `<div class="message-role">${escapeText(role)}</div><div class="message-content"></div>`;
-    el.querySelector(".message-content").textContent = content || "";
+    el.setAttribute("aria-label", role === "user" ? "Your message" : "Assistant response");
+    el.innerHTML = `<div class="message-content"></div>`;
+    const contentEl = el.querySelector(".message-content");
+    contentEl.textContent = content || "";
     $("messages").appendChild(el);
     $("messages").scrollTop = $("messages").scrollHeight;
-    return el.querySelector(".message-content");
+    return contentEl;
+  }
+
+  function showTypingIndicator(contentEl) {
+    contentEl.innerHTML = `<span class="typing-indicator" aria-label="Generating response"><span></span><span></span><span></span></span>`;
+    contentEl.dataset.typing = "true";
+  }
+
+  function clearTypingIndicator(contentEl) {
+    if (contentEl.dataset.typing === "true") {
+      contentEl.textContent = "";
+      delete contentEl.dataset.typing;
+    }
   }
 
   async function sendMessage(event) {
@@ -245,17 +272,22 @@
     showError("chat-error", "");
     state.streaming = true;
     $("send-button").disabled = true;
+    input.setAttribute("aria-busy", "true");
     input.value = "";
     appendMessage("user", content);
     const assistantContent = appendMessage("assistant", "");
+    showTypingIndicator(assistantContent);
     try {
       await streamMessage(content, assistantContent);
       await loadChats();
     } catch (error) {
+      clearTypingIndicator(assistantContent);
       showError("chat-error", error.message);
+      assistantContent.textContent = error.message;
     } finally {
       state.streaming = false;
       $("send-button").disabled = false;
+      input.removeAttribute("aria-busy");
     }
   }
 
@@ -290,12 +322,20 @@
         for (const line of lines) {
           const payload = line.replace(/^data:\s?/, "");
           if (payload === "[DONE]") {
+            clearTypingIndicator(assistantContent);
             if (finalMessage) assistantContent.textContent = finalMessage.content || assistantContent.textContent;
             return;
           }
           const parsed = JSON.parse(payload);
           if (parsed.error) throw new Error(parsed.error.message || parsed.error);
-          if (parsed.content) assistantContent.textContent += parsed.content;
+          if (parsed.context) {
+            state.contextMessage = parsed.context.message || "";
+            showContextStatus(state.contextMessage);
+          }
+          if (parsed.content) {
+            clearTypingIndicator(assistantContent);
+            assistantContent.textContent += parsed.content;
+          }
           if (parsed.message) finalMessage = parsed.message;
           $("messages").scrollTop = $("messages").scrollHeight;
         }
