@@ -16,6 +16,14 @@ private data class AppPromptPlan(
     val context: FileContextBuildResult?,
     val fileIds: List<String>,
     val messages: List<MessageRecord>,
+    val skill: SkillRecord,
+    val skillState: ChatSkillStateRecord,
+)
+
+private data class ParsedModelResponse(
+    val rawModelText: String,
+    val thinkingText: String?,
+    val finalText: String,
 )
 
 class LocalHttpServer(
@@ -34,6 +42,8 @@ class LocalHttpServer(
 
     private val modelId = "local-litert-lm"
     private val promptBudgetManager = PromptBudgetManager()
+    private val skillRepository = SkillRepository(appContext)
+    private val toolRegistry = ToolRegistry(chatRepository, fileRepository)
 
     override fun serve(session: IHTTPSession): Response {
         if (session.method == Method.OPTIONS) return corsPreflightResponse()
@@ -42,6 +52,10 @@ class LocalHttpServer(
         val chatId = chatIdFromPath(path)
         val messageChatId = chatMessageChatIdFromPath(path)
         val chatFilesChatId = chatFilesChatIdFromPath(path)
+        val chatSkillChatId = chatSkillChatIdFromPath(path)
+        val chatToolLogsChatId = chatToolLogsChatIdFromPath(path)
+        val adminSkillSlug = adminSkillSlugFromPath(path)
+        val skillSlug = skillSlugFromPath(path)
         val chatFileAttachment = chatFileAttachmentFromPath(path)
         val fileId = fileIdFromPath(path)
         return when {
@@ -69,10 +83,20 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/api/admin/status" -> adminStatusResponse(session)
             session.method == Method.GET && path == "/api/admin/users" -> adminUsersResponse(session)
             session.method == Method.GET && path == "/api/admin/files" -> adminFilesResponse(session)
+            session.method == Method.GET && path == "/api/skills" -> listSkillsResponse(session)
+            session.method == Method.GET && skillSlug != null -> getSkillResponse(session, skillSlug)
+            session.method == Method.POST && path == "/api/admin/skills" -> adminCreateSkillResponse(session)
+            session.method == Method.PUT && adminSkillSlug != null -> adminUpdateSkillResponse(session, adminSkillSlug)
+            session.method == Method.DELETE && adminSkillSlug != null -> adminDeleteSkillResponse(session, adminSkillSlug)
+            session.method == Method.GET && path == "/api/tools" -> listToolsResponse(session, admin = false)
+            session.method == Method.GET && path == "/api/admin/tools" -> listToolsResponse(session, admin = true)
             session.method == Method.GET && path == "/api/chats" -> listChatsResponse(session)
             session.method == Method.POST && path == "/api/chats" -> createChatResponse(session)
             session.method == Method.GET && path == "/api/files" -> listFilesResponse(session)
             session.method == Method.POST && path == "/api/files/upload" -> uploadFileResponse(session)
+            session.method == Method.GET && chatSkillChatId != null -> getChatSkillResponse(session, chatSkillChatId)
+            session.method == Method.PUT && chatSkillChatId != null -> putChatSkillResponse(session, chatSkillChatId)
+            session.method == Method.GET && chatToolLogsChatId != null -> chatToolLogsResponse(session, chatToolLogsChatId)
             session.method == Method.GET && chatFilesChatId != null -> listChatFilesResponse(session, chatFilesChatId)
             session.method == Method.POST && chatFilesChatId != null -> attachChatFileResponse(session, chatFilesChatId)
             session.method == Method.DELETE && chatFileAttachment != null -> detachChatFileResponse(
@@ -130,6 +154,26 @@ class LocalHttpServer(
     private fun chatFilesChatIdFromPath(path: String): String? {
         val parts = path.split('/').filter { it.isNotBlank() }
         return if (parts.size == 4 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "files") parts[2] else null
+    }
+
+    private fun chatSkillChatIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 4 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "skill") parts[2] else null
+    }
+
+    private fun chatToolLogsChatIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 5 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "tools" && parts[4] == "logs") parts[2] else null
+    }
+
+    private fun skillSlugFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 3 && parts[0] == "api" && parts[1] == "skills") parts[2] else null
+    }
+
+    private fun adminSkillSlugFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 4 && parts[0] == "api" && parts[1] == "admin" && parts[2] == "skills") parts[3] else null
     }
 
     private fun chatFileAttachmentFromPath(path: String): Pair<String, String>? {
@@ -205,6 +249,10 @@ class LocalHttpServer(
                     .put("chats", "GET/POST /api/chats")
                     .put("chatDetail", "GET/DELETE /api/chats/{chatId}")
                     .put("chatMessages", "POST /api/chats/{chatId}/messages")
+                    .put("skills", "GET /api/skills")
+                    .put("chatSkill", "GET/PUT /api/chats/{chatId}/skill")
+                    .put("tools", "GET /api/tools")
+                    .put("toolLogs", "GET /api/chats/{chatId}/tools/logs")
                     .put("chatFiles", "GET/POST /api/chats/{chatId}/files")
                     .put("chatFileDetail", "DELETE /api/chats/{chatId}/files/{fileId}")
                     .put("files", "GET /api/files")
@@ -213,6 +261,8 @@ class LocalHttpServer(
                     .put("adminStatus", "GET /api/admin/status")
                     .put("adminUsers", "GET /api/admin/users")
                     .put("adminFiles", "GET /api/admin/files")
+                    .put("adminSkills", "POST/PUT/DELETE /api/admin/skills")
+                    .put("adminTools", "GET /api/admin/tools")
                     .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
                     .put("performanceHistory", "GET /debug/perf/history")
@@ -602,6 +652,83 @@ class LocalHttpServer(
         return jsonResponse(Response.Status.OK, JSONObject().put("status", "ok"))
     }
 
+
+    private fun listSkillsResponse(session: IHTTPSession): Response {
+        requireAppUser(session) ?: return unauthorizedResponse()
+        val skills = JSONArray()
+        skillRepository.listEnabledSkills().forEach { skills.put(skillJson(it, includePrompt = false)) }
+        return jsonResponse(Response.Status.OK, JSONObject().put("skills", skills))
+    }
+
+    private fun getSkillResponse(session: IHTTPSession, slug: String): Response {
+        requireAppUser(session) ?: return unauthorizedResponse()
+        val skill = skillRepository.getSkillBySlug(slug) ?: return notFoundResponse()
+        return jsonResponse(Response.Status.OK, JSONObject().put("skill", skillJson(skill, includePrompt = false)))
+    }
+
+    private fun adminCreateSkillResponse(session: IHTTPSession): Response = withAdmin(session) {
+        val json = readJsonRequest(session) ?: return@withAdmin jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Malformed JSON"))
+        val skill = skillRepository.upsertCustomSkill(json) ?: return@withAdmin jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Invalid skill"))
+        jsonResponse(Response.Status.OK, JSONObject().put("skill", skillJson(skill, includePrompt = true)))
+    }
+
+    private fun adminUpdateSkillResponse(session: IHTTPSession, slug: String): Response = withAdmin(session) {
+        val json = readJsonRequest(session) ?: return@withAdmin jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Malformed JSON"))
+        val skill = skillRepository.upsertCustomSkill(json, existingSlug = slug) ?: return@withAdmin jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Invalid skill"))
+        jsonResponse(Response.Status.OK, JSONObject().put("skill", skillJson(skill, includePrompt = true)))
+    }
+
+    private fun adminDeleteSkillResponse(session: IHTTPSession, slug: String): Response = withAdmin(session) {
+        if (!skillRepository.disableOrDeleteSkill(slug)) return@withAdmin notFoundResponse()
+        jsonResponse(Response.Status.OK, JSONObject().put("status", "ok"))
+    }
+
+    private fun getChatSkillResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        val state = skillRepository.getChatSkillState(chatId)
+        val skill = skillRepository.getSkillBySlug(state.skillSlug) ?: return notFoundResponse()
+        return jsonResponse(Response.Status.OK, JSONObject().put("skill", skillJson(skill, false)).put("state", chatSkillStateJson(state)))
+    }
+
+    private fun putChatSkillResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        val json = readJsonRequest(session) ?: return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Malformed JSON"))
+        val current = skillRepository.getChatSkillState(chatId)
+        val slug = json.optString("skillSlug", current.skillSlug).trim().ifBlank { current.skillSlug }
+        val state = skillRepository.setChatSkillState(
+            chatId,
+            slug,
+            if (json.has("thinkingEnabled")) json.optBoolean("thinkingEnabled") else null,
+            if (json.has("showThinking")) json.optBoolean("showThinking") else null,
+        ) ?: return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Skill is unavailable"))
+        val skill = skillRepository.getSkillBySlug(state.skillSlug) ?: return notFoundResponse()
+        return jsonResponse(Response.Status.OK, JSONObject().put("skill", skillJson(skill, false)).put("state", chatSkillStateJson(state)))
+    }
+
+    private fun listToolsResponse(session: IHTTPSession, admin: Boolean): Response {
+        if (admin) {
+            val user = authRepository.requireUser(sessionTokenFromRequest(session)) ?: return unauthorizedResponse()
+            if (user.role != UserRole.ADMIN) return jsonResponse(Response.Status.FORBIDDEN, JSONObject().put("error", "Forbidden"))
+        } else {
+            requireAppUser(session) ?: return unauthorizedResponse()
+        }
+        val array = JSONArray()
+        (if (admin) toolRegistry.listAdminMetadata() else toolRegistry.listSafeMetadata()).forEach { array.put(toolJson(it, admin)) }
+        return jsonResponse(Response.Status.OK, JSONObject().put("tools", array))
+    }
+
+    private fun chatToolLogsResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        val logs = JSONArray()
+        skillRepository.listToolLogs(chatId).forEach { log ->
+            logs.put(JSONObject().put("id", log.id).put("toolName", log.toolName).put("status", log.status.name).put("errorMessage", log.errorMessage ?: JSONObject.NULL).put("createdAtMs", log.createdAtMs))
+        }
+        return jsonResponse(Response.Status.OK, JSONObject().put("logs", logs))
+    }
+
     private fun createMessageResponse(session: IHTTPSession, chatId: String): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
@@ -621,11 +748,24 @@ class LocalHttpServer(
         } else {
             chatRepository.listAttachedFileIds(user.id, chat.id) ?: return notFoundResponse()
         }
+        val requestedSkillSlug = requestJson.optString("skillSlug").trim().takeIf { it.isNotBlank() }
+        val baseState = skillRepository.getChatSkillState(chat.id)
+        val activeState = if (requestedSkillSlug != null || requestJson.has("thinkingEnabled") || requestJson.has("showThinking")) {
+            skillRepository.setChatSkillState(
+                chat.id,
+                requestedSkillSlug ?: baseState.skillSlug,
+                if (requestJson.has("thinkingEnabled")) requestJson.optBoolean("thinkingEnabled") else null,
+                if (requestJson.has("showThinking")) requestJson.optBoolean("showThinking") else null,
+            ) ?: return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Skill is unavailable"))
+        } else {
+            baseState
+        }
+        val skill = skillRepository.getSkillBySlug(activeState.skillSlug) ?: return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Skill is unavailable"))
         val userMessage = chatRepository.addMessage(chat.id, "user", content)
         val messages = chatRepository.listMessages(user.id, chat.id).orEmpty()
         val conversationMode = ConversationMode.FRESH_PER_REQUEST
-        val responseMode = responseModeForChatProfile(chat.profile)
-        val promptPlan = buildAppPromptPlan(user.id, chat.id, fileIds, messages, userMessage, responseMode, retry = false)
+        val responseMode = responseModeForSkill(skill, chat.profile)
+        val promptPlan = buildAppPromptPlan(user.id, chat.id, fileIds, messages, userMessage, responseMode, retry = false, skill = skill, skillState = activeState)
             ?: return notFoundResponse()
         val prompt = liteRtLmManager.applyResponseModeHint(promptPlan.plan.finalPrompt, responseMode)
         return if (requestJson.optBoolean("stream", false)) {
@@ -634,37 +774,19 @@ class LocalHttpServer(
             if (!liteRtLmManager.isLoaded()) {
                 return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, JSONObject().put("error", "Model is not loaded"))
             }
-            var usedPlan = promptPlan
-            var result = runBlocking {
-                liteRtLmManager.generate(
-                    prompt = prompt,
-                    conversationModeOverride = conversationMode,
-                    responseModeOverride = responseMode,
-                )
-            }
-            val firstError = result.exceptionOrNull()
-            if (firstError != null && promptBudgetManager.isTokenOverflow(firstError)) {
-                val retryPlan = buildAppPromptPlan(user.id, chat.id, fileIds, messages, userMessage, responseMode, retry = true)
-                    ?: return notFoundResponse()
-                usedPlan = retryPlan
-                result = runBlocking {
-                    liteRtLmManager.generate(
-                        prompt = liteRtLmManager.applyResponseModeHint(retryPlan.plan.finalPrompt, responseMode),
-                        conversationModeOverride = conversationMode,
-                        responseModeOverride = responseMode,
-                    )
-                }
-            }
+            val result = generateAppReply(user.id, chat, userMessage, promptPlan, responseMode, conversationMode)
             result.fold(
-                onSuccess = { output ->
+                onSuccess = { (usedPlan, parsed) ->
                     updateContextState(chat.id, usedPlan.context)
-                    val assistantMessage = chatRepository.addMessage(chat.id, "assistant", output)
+                    val assistantMessage = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
                     jsonResponse(
                         Response.Status.OK,
                         JSONObject()
                             .put("message", messageJson(assistantMessage))
                             .put("userMessage", messageJson(userMessage))
                             .put("context", contextJson(usedPlan.plan.contextMetadata))
+                            .put("skill", skillJson(usedPlan.skill, false))
+                            .put("thinking", JSONObject().put("present", parsed.thinkingText != null).put("visible", usedPlan.skillState.showThinking))
                     )
                 },
                 onFailure = { error ->
@@ -1135,6 +1257,158 @@ class LocalHttpServer(
             )
     }
 
+
+    private fun generateAppReply(
+        userId: String,
+        chat: ChatRecord,
+        userMessage: MessageRecord,
+        initialPlan: AppPromptPlan,
+        responseMode: ResponseMode,
+        conversationMode: ConversationMode,
+        retry: Boolean = true,
+        onToolEvent: ((JSONObject) -> Unit)? = null,
+    ): Result<Pair<AppPromptPlan, ParsedModelResponse>> {
+        var usedPlan = initialPlan
+        var result = runBlocking {
+            liteRtLmManager.generate(
+                prompt = liteRtLmManager.applyResponseModeHint(usedPlan.plan.finalPrompt, responseMode),
+                conversationModeOverride = conversationMode,
+                responseModeOverride = responseMode,
+            )
+        }
+        val firstError = result.exceptionOrNull()
+        if (retry && firstError != null && promptBudgetManager.isTokenOverflow(firstError)) {
+            val retryPlan = buildAppPromptPlan(userId, chat.id, usedPlan.fileIds, usedPlan.messages, userMessage, responseMode, retry = true, skill = usedPlan.skill, skillState = usedPlan.skillState)
+                ?: return Result.failure(firstError)
+            usedPlan = retryPlan
+            result = runBlocking {
+                liteRtLmManager.generate(
+                    prompt = liteRtLmManager.applyResponseModeHint(retryPlan.plan.finalPrompt, responseMode),
+                    conversationModeOverride = conversationMode,
+                    responseModeOverride = responseMode,
+                )
+            }
+        }
+        val firstText = result.getOrElse { return Result.failure(it) }
+        val toolCall = toolRegistry.parseToolCall(firstText)
+        if (toolCall != null && usedPlan.skill.toolUseMode != ToolUseMode.NONE) {
+            onToolEvent?.invoke(JSONObject().put("toolCall", JSONObject().put("name", toolCall.name).put("status", "started")))
+            val toolResult = toolRegistry.execute(userId, chat.id, usedPlan.skill, toolCall)
+            skillRepository.insertToolLog(chat.id, userMessage.id, toolCall.name, toolCall.raw, toolResult.result, toolResult.status, toolResult.error)
+            onToolEvent?.invoke(JSONObject().put("toolCall", JSONObject().put("name", toolCall.name).put("status", toolResult.status.name.lowercase())))
+            val toolBlock = if (toolResult.status == ToolCallStatus.SUCCESS) {
+                "Tool result for ${toolCall.name}: ${toolResult.result}"
+            } else {
+                "The requested tool '${toolCall.name}' is unavailable or rejected. Continue safely without using it."
+            }
+            val followPlan = buildAppPromptPlan(userId, chat.id, usedPlan.fileIds, usedPlan.messages, userMessage, responseMode, retry = false, skill = usedPlan.skill, skillState = usedPlan.skillState, toolResultBlock = toolBlock)
+                ?: usedPlan
+            usedPlan = followPlan
+            val follow = runBlocking {
+                liteRtLmManager.generate(
+                    prompt = liteRtLmManager.applyResponseModeHint(followPlan.plan.finalPrompt, responseMode),
+                    conversationModeOverride = conversationMode,
+                    responseModeOverride = responseMode,
+                )
+            }.getOrElse { return Result.failure(it) }
+            return Result.success(usedPlan to parseAndValidateResponse(usedPlan.skill, follow, userMessage.content))
+        }
+        return Result.success(usedPlan to parseAndValidateResponse(usedPlan.skill, firstText, userMessage.content))
+    }
+
+    private fun parseAndValidateResponse(skill: SkillRecord, raw: String, userContent: String): ParsedModelResponse {
+        var parsed = parseThinking(raw)
+        if (skill.strictOutput) {
+            val minified = minifiedJsonObject(parsed.finalText) ?: minifiedJsonObject(parsed.rawModelText)
+            parsed = if (minified != null) {
+                parsed.copy(finalText = minified)
+            } else if (skill.slug == "gdpr-pii-audit") {
+                parsed.copy(finalText = gdprFallbackJson(userContent))
+            } else {
+                parsed.copy(finalText = "The model did not return valid JSON for this skill. Please try again.")
+            }
+        }
+        return parsed
+    }
+
+    private fun gdprFallbackJson(text: String): String {
+        val hasNameLikePair = Regex("\\b[A-ZÄÖÜ][a-zäöüß]+\\s+[A-ZÄÖÜ][a-zäöüß]+\\b").containsMatchIn(text)
+        val hasIdentifier = Regex("(?i)\\b(student|pupil|teacher|staff|parent|class|klasse|id|email|absent|illness|krank)\\b").containsMatchIn(text)
+        val aggregateOnly = Regex("(?i)\\b(aggregated|anonymous|anonymized|percent|percentage|increased|decreased|average|total)\\b").containsMatchIn(text) && !hasNameLikePair
+        val confirm = (hasNameLikePair || hasIdentifier && !aggregateOnly)
+        val reason = if (confirm) {
+            "The snippet appears to contain identifiable student, staff, or parent information or specific identifiers."
+        } else {
+            "The snippet appears aggregated or anonymized and does not identify a specific student, staff member, or parent."
+        }
+        return JSONObject().put("confirm_deletion", confirm).put("reason", reason).toString()
+    }
+
+    private fun minifiedJsonObject(text: String): String? {
+        val cleaned = text.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+        val json = runCatching { JSONObject(cleaned) }.getOrNull() ?: return null
+        return json.toString()
+    }
+
+    private fun parseThinking(raw: String): ParsedModelResponse {
+        val patterns = listOf(
+            Regex("(?s)<\\|think\\|>(.*?)</\\|think\\|>"),
+            Regex("(?s)<think>(.*?)</think>"),
+        )
+        for (pattern in patterns) {
+            val match = pattern.find(raw)
+            if (match != null) {
+                val thinking = match.groupValues[1].trim().takeIf { it.isNotBlank() }
+                val final = raw.replaceRange(match.range, "").trim()
+                return ParsedModelResponse(raw, thinking, final)
+            }
+        }
+        val openGemma = raw.indexOf("<|think|>")
+        val openXml = raw.indexOf("<think>")
+        val open = listOf(openGemma, openXml).filter { it >= 0 }.minOrNull()
+        if (open != null) return ParsedModelResponse(raw, raw.substring(open).trim().takeIf { it.isNotBlank() }, raw.substring(0, open).trim())
+        return ParsedModelResponse(raw, null, raw.trim())
+    }
+
+    private fun buildSkillPromptPrefix(skill: SkillRecord, state: ChatSkillStateRecord, toolResultBlock: String?): String {
+        return buildString {
+            appendLine(skill.systemPrompt)
+            appendLine()
+            if (state.thinkingEnabled) {
+                appendLine("If you need to reason internally, place reasoning inside:")
+                appendLine("<|think|>")
+                appendLine("...")
+                appendLine("</|think|>")
+                appendLine("Then provide the final answer after the thinking block.")
+            } else {
+                appendLine("Do not include <|think|> blocks. Provide only the final answer.")
+            }
+            if (skill.strictOutput) {
+                appendLine("Strict output mode: output only the requested schema. Do not use Markdown fences.")
+            }
+            val toolInstructions = toolRegistry.toolInstructions(skill)
+            if (toolInstructions.isNotBlank()) {
+                appendLine()
+                appendLine(toolInstructions)
+            }
+            if (!toolResultBlock.isNullOrBlank()) {
+                appendLine()
+                appendLine("[Tool Result]")
+                appendLine(toolResultBlock)
+                appendLine("[/Tool Result]")
+                appendLine("Use the tool result above to produce the final answer. Do not output another tool call.")
+            }
+        }.trim()
+    }
+
+    private fun responseModeForSkill(skill: SkillRecord, profile: ChatProfile): ResponseMode {
+        return when (skill.responseMode) {
+            "CODING_CONCISE" -> ResponseMode.CODING_CONCISE
+            "BALANCED" -> ResponseMode.BALANCED
+            else -> responseModeForChatProfile(profile)
+        }
+    }
+
     private fun streamingAppMessageResponse(
         chat: ChatRecord,
         userMessage: MessageRecord,
@@ -1162,49 +1436,24 @@ class LocalHttpServer(
                         return@use
                     }
                     writeEvent(JSONObject().put("context", contextJson(promptPlan.plan.contextMetadata)).toString())
-                    var usedPlan = promptPlan
-                    var emittedContent = false
-                    var result = runBlocking {
-                        liteRtLmManager.generateStreaming(
-                            prompt = prompt,
-                            onChunk = { chunk ->
-                                emittedContent = true
-                                writeEvent(JSONObject().put("content", chunk).toString())
-                            },
-                            conversationModeOverride = conversationMode,
-                            responseModeOverride = responseMode,
-                        )
-                    }
-                    val firstError = result.exceptionOrNull()
-                    if (!emittedContent && firstError != null && promptBudgetManager.isTokenOverflow(firstError)) {
-                        val retryPlan = buildAppPromptPlan(
-                            userId = chat.userId,
-                            chatId = chat.id,
-                            fileIds = promptPlan.fileIds,
-                            messages = promptPlan.messages,
-                            userMessage = userMessage,
-                            responseMode = responseMode,
-                            retry = true,
-                        )
-                        if (retryPlan != null) {
-                            usedPlan = retryPlan
-                            writeEvent(JSONObject().put("context", contextJson(retryPlan.plan.contextMetadata)).toString())
-                            result = runBlocking {
-                                liteRtLmManager.generateStreaming(
-                                    prompt = liteRtLmManager.applyResponseModeHint(retryPlan.plan.finalPrompt, responseMode),
-                                    onChunk = { chunk ->
-                                        writeEvent(JSONObject().put("content", chunk).toString())
-                                    },
-                                    conversationModeOverride = conversationMode,
-                                    responseModeOverride = responseMode,
-                                )
-                            }
-                        }
-                    }
+                    writeEvent(JSONObject().put("skill", skillJson(promptPlan.skill, false)).toString())
+                    val result = generateAppReply(
+                        userId = chat.userId,
+                        chat = chat,
+                        userMessage = userMessage,
+                        initialPlan = promptPlan,
+                        responseMode = responseMode,
+                        conversationMode = conversationMode,
+                        onToolEvent = { writeEvent(it.toString()) },
+                    )
                     result.fold(
-                        onSuccess = { outputText ->
+                        onSuccess = { (usedPlan, parsed) ->
                             updateContextState(chat.id, usedPlan.context)
-                            val assistantMessage = chatRepository.addMessage(chat.id, "assistant", outputText)
+                            if (parsed.thinkingText != null && usedPlan.skillState.showThinking) {
+                                writeEvent(JSONObject().put("thinking", JSONObject().put("content", parsed.thinkingText).put("visible", true)).toString())
+                            }
+                            if (parsed.finalText.isNotBlank()) writeEvent(JSONObject().put("content", parsed.finalText).toString())
+                            val assistantMessage = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
                             writeEvent(JSONObject().put("message", messageJson(assistantMessage)).toString())
                             writeEvent("[DONE]")
                         },
@@ -1239,6 +1488,9 @@ class LocalHttpServer(
         userMessage: MessageRecord,
         responseMode: ResponseMode,
         retry: Boolean,
+        skill: SkillRecord,
+        skillState: ChatSkillStateRecord,
+        toolResultBlock: String? = null,
     ): AppPromptPlan? {
         val continuationMode = promptBudgetManager.isContinuationRequest(userMessage.content)
         val state = if (continuationMode) {
@@ -1266,18 +1518,22 @@ class LocalHttpServer(
                 continuationState = state,
             ) ?: return null
         }
-        val plan = promptBudgetManager.buildPlan(
+        val basePlan = promptBudgetManager.buildPlan(
             messages = messages,
             currentUserMessageId = userMessage.id,
             context = context,
             continuationMode = continuationMode,
             retry = retry,
         )
+        val promptPrefix = buildSkillPromptPrefix(skill, skillState, toolResultBlock)
+        val plan = basePlan.copy(finalPrompt = promptBudgetManager.limitFinalPrompt(promptPrefix + "\n\n" + basePlan.finalPrompt))
         return AppPromptPlan(
             plan = plan,
             context = context,
             fileIds = fileIds,
             messages = messages,
+            skill = skill,
+            skillState = skillState,
         )
     }
 
@@ -1322,7 +1578,44 @@ class LocalHttpServer(
             .put("id", message.id)
             .put("role", message.role)
             .put("content", message.content)
+            .put("thinking", message.thinking ?: JSONObject.NULL)
             .put("createdAtMs", message.createdAtMs)
+    }
+
+    private fun skillJson(skill: SkillRecord, includePrompt: Boolean): JSONObject {
+        val json = JSONObject()
+            .put("slug", skill.slug)
+            .put("displayName", skill.displayName)
+            .put("description", skill.description)
+            .put("responseMode", skill.responseMode ?: JSONObject.NULL)
+            .put("thinkingDefault", skill.thinkingDefault)
+            .put("showThinkingDefault", skill.showThinkingDefault)
+            .put("toolUseMode", skill.toolUseMode.name)
+            .put("allowedTools", JSONArray(skill.allowedTools))
+            .put("strictOutput", skill.strictOutput)
+            .put("builtIn", skill.builtIn)
+            .put("enabled", skill.enabled)
+        if (includePrompt) json.put("systemPrompt", skill.systemPrompt).put("outputSchema", skill.outputSchemaJson?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject.NULL)
+        return json
+    }
+
+    private fun chatSkillStateJson(state: ChatSkillStateRecord): JSONObject {
+        return JSONObject()
+            .put("chatId", state.chatId)
+            .put("skillSlug", state.skillSlug)
+            .put("thinkingEnabled", state.thinkingEnabled)
+            .put("showThinking", state.showThinking)
+            .put("updatedAtMs", state.updatedAtMs)
+    }
+
+    private fun toolJson(tool: ToolDefinition, admin: Boolean): JSONObject {
+        val json = JSONObject()
+            .put("name", tool.name)
+            .put("displayName", tool.displayName)
+            .put("description", tool.description)
+            .put("enabled", tool.enabled)
+        if (admin) json.put("dangerLevel", tool.dangerLevel).put("allowedForSkills", JSONArray(tool.allowedForSkills)).put("inputSchema", tool.inputSchema).put("outputSchema", tool.outputSchema)
+        return json
     }
 
     private fun fileJson(file: UploadedFileRecord): JSONObject {

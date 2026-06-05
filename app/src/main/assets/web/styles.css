@@ -574,3 +574,50 @@ th {
     grid-template-columns: 1fr;
   }
 }
+
+
+.chat-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.chat-controls select {
+  margin-left: 0.35rem;
+}
+
+.thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.tool-status {
+  min-height: 1.25rem;
+  padding: 0.25rem 1rem;
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+.thinking-panel {
+  margin-bottom: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 0.75rem;
+  background: rgba(148, 163, 184, 0.08);
+  padding: 0.5rem 0.75rem;
+}
+
+.thinking-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.thinking-body {
+  margin-top: 0.5rem;
+  white-space: pre-wrap;
+  color: #475569;
+}
