@@ -15,6 +15,8 @@ data class MessageRecord(
     val role: String,
     val content: String,
     val createdAtMs: Long,
+    val thinking: String? = null,
+    val rawContent: String? = null,
 )
 
 data class ChatFileContextState(

@@ -6,8 +6,12 @@
     currentChatId: null,
     messages: [],
     attachedFiles: [],
+    skills: [],
+    currentSkill: null,
+    skillState: null,
     streaming: false,
     contextMessage: "",
+    toolStatus: "",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -128,6 +132,8 @@
     $("logout-button").addEventListener("click", logout);
     $("new-chat-button").addEventListener("click", createChat);
     $("file-upload").addEventListener("change", uploadFile);
+    $("skill-select").addEventListener("change", () => changeSkill($("skill-select").value));
+    $("show-thinking-toggle").addEventListener("change", () => updateThinkingToggle($("show-thinking-toggle").checked));
     $("message-form").addEventListener("submit", sendMessage);
     $("message-input").addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !state.streaming) {
@@ -135,6 +141,7 @@
         $("message-form").requestSubmit();
       }
     });
+    await loadSkills();
     await loadChats();
     if (!state.currentChatId) await createChat();
   }
@@ -205,6 +212,7 @@
     });
     state.currentChatId = result.chat.id;
     state.messages = [];
+    await loadSkills();
     await loadChats();
   }
 
@@ -213,9 +221,11 @@
     const result = await jsonRequest(`/api/chats/${encodeURIComponent(chatId)}`);
     state.messages = result.messages || [];
     state.attachedFiles = result.files || [];
+    await loadChatSkill(chatId);
     renderChats();
     renderMessages();
     renderSelectedFiles();
+    renderSkillControls();
   }
 
   function renderChats() {
@@ -234,7 +244,7 @@
   function renderMessages() {
     const list = $("messages");
     list.innerHTML = "";
-    state.messages.forEach((message) => appendMessage(message.role, message.content, { final: true }));
+    state.messages.forEach((message) => appendMessage(message.role, message.content, { final: true, thinking: message.thinking }));
     showContextStatus(state.contextMessage);
     list.scrollTop = list.scrollHeight;
   }
@@ -243,12 +253,21 @@
     const el = document.createElement("article");
     el.className = `message ${role}`;
     el.setAttribute("aria-label", role === "user" ? "Your message" : "Assistant response");
-    el.innerHTML = `<div class="message-content"></div>`;
+    el.innerHTML = `<div class="thinking-slot"></div><div class="message-content"></div>`;
     const contentEl = el.querySelector(".message-content");
+    renderThinking(el.querySelector(".thinking-slot"), role, options.thinking || "");
     setMessageContent(contentEl, role, content || "", options.final === true);
     $("messages").appendChild(el);
     $("messages").scrollTop = $("messages").scrollHeight;
     return contentEl;
+  }
+
+  function renderThinking(slot, role, thinking) {
+    if (role !== "assistant" || !thinking || !state.skillState || !state.skillState.showThinking) {
+      slot.innerHTML = "";
+      return;
+    }
+    slot.innerHTML = `<details class="thinking-panel"><summary>Model reasoning</summary><div class="thinking-body">${escapeText(thinking)}</div></details>`;
   }
 
   function setMessageContent(contentEl, role, content, final) {
@@ -271,13 +290,104 @@
     }
   }
 
+
+  async function loadSkills() {
+    const result = await jsonRequest("/api/skills");
+    state.skills = result.skills || [];
+    renderSkillControls();
+  }
+
+  async function loadChatSkill(chatId) {
+    const result = await jsonRequest(`/api/chats/${encodeURIComponent(chatId)}/skill`);
+    state.currentSkill = result.skill;
+    state.skillState = result.state;
+  }
+
+  function renderSkillControls() {
+    const select = $("skill-select");
+    if (!select) return;
+    select.innerHTML = "";
+    state.skills.forEach((skill) => {
+      const option = document.createElement("option");
+      option.value = skill.slug;
+      option.textContent = skill.displayName;
+      if (state.currentSkill && state.currentSkill.slug === skill.slug) option.selected = true;
+      select.appendChild(option);
+    });
+    const toggle = $("show-thinking-toggle");
+    if (toggle) toggle.checked = Boolean(state.skillState && state.skillState.showThinking);
+  }
+
+  async function changeSkill(slug, options = {}) {
+    if (!state.currentChatId) return;
+    const body = { skillSlug: slug };
+    if (Object.prototype.hasOwnProperty.call(options, "thinkingEnabled")) body.thinkingEnabled = options.thinkingEnabled;
+    if (Object.prototype.hasOwnProperty.call(options, "showThinking")) body.showThinking = options.showThinking;
+    const result = await jsonRequest(`/api/chats/${encodeURIComponent(state.currentChatId)}/skill`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    state.currentSkill = result.skill;
+    state.skillState = result.state;
+    renderSkillControls();
+    renderMessages();
+    showSkillStatus(`Skill changed to ${result.skill.displayName}`);
+  }
+
+  async function updateThinkingToggle(showThinking) {
+    if (!state.currentChatId || !state.currentSkill) return;
+    const result = await jsonRequest(`/api/chats/${encodeURIComponent(state.currentChatId)}/skill`, {
+      method: "PUT",
+      body: JSON.stringify({ skillSlug: state.currentSkill.slug, showThinking }),
+    });
+    state.currentSkill = result.skill;
+    state.skillState = result.state;
+    renderMessages();
+  }
+
+  function showSkillStatus(message) {
+    const el = $("skill-status");
+    if (!el) return;
+    el.textContent = message || "";
+    if (message) setTimeout(() => { if (el.textContent === message) el.textContent = ""; }, 2500);
+  }
+
+  function slashCommand(content) {
+    if (!content.startsWith("/")) return null;
+    const [command, ...rest] = content.split(/\s+/);
+    const aliases = {
+      "/default": "default",
+      "/coding": "coding",
+      "/code": "coding",
+      "/gdpr": "gdpr-pii-audit",
+      "/pii": "gdpr-pii-audit",
+      "/markdown": "markdown-qa",
+      "/md": "markdown-qa",
+      "/qa": "markdown-qa",
+    };
+    return { slug: aliases[command.toLowerCase()] || null, trailing: rest.join(" ").trim(), command };
+  }
+
   async function sendMessage(event) {
     event.preventDefault();
     if (state.streaming) return;
     const input = $("message-input");
-    const content = input.value.trim();
+    let content = input.value.trim();
     if (!content || !state.currentChatId) return;
     showError("chat-error", "");
+    const command = slashCommand(content);
+    if (command) {
+      if (!command.slug) {
+        showError("chat-error", `Unknown slash command: ${command.command}`);
+        return;
+      }
+      await changeSkill(command.slug);
+      if (!command.trailing) {
+        input.value = "";
+        return;
+      }
+      content = command.trailing;
+    }
     state.streaming = true;
     $("send-button").disabled = true;
     input.setAttribute("aria-busy", "true");
@@ -287,7 +397,8 @@
     showTypingIndicator(assistantContent);
     try {
       await streamMessage(content, assistantContent);
-      await loadChats();
+      await loadSkills();
+    await loadChats();
     } catch (error) {
       clearTypingIndicator(assistantContent);
       showError("chat-error", error.message);
@@ -307,6 +418,9 @@
         content,
         stream: true,
         fileIds: state.attachedFiles.map((file) => file.id),
+        skillSlug: state.currentSkill ? state.currentSkill.slug : undefined,
+        thinkingEnabled: state.skillState ? state.skillState.thinkingEnabled : undefined,
+        showThinking: state.skillState ? state.skillState.showThinking : false,
       }),
     });
     if (!response.ok) {
@@ -332,11 +446,30 @@
           if (payload === "[DONE]") {
             clearTypingIndicator(assistantContent);
             const finalContent = finalMessage ? finalMessage.content || assistantContent.textContent : assistantContent.textContent;
+            if (finalMessage) {
+              const article = assistantContent.closest(".message");
+              if (article) renderThinking(article.querySelector(".thinking-slot"), "assistant", finalMessage.thinking || "");
+            }
             setMessageContent(assistantContent, "assistant", finalContent, true);
+            const toolEl = $("tool-status");
+            if (toolEl) setTimeout(() => { toolEl.textContent = ""; }, 2000);
             return;
           }
           const parsed = JSON.parse(payload);
           if (parsed.error) throw new Error(parsed.error.message || parsed.error);
+          if (parsed.skill) {
+            state.currentSkill = parsed.skill;
+            renderSkillControls();
+          }
+          if (parsed.toolCall) {
+            const status = parsed.toolCall.status === "started" ? `Using tool: ${parsed.toolCall.name}...` : `Tool ${parsed.toolCall.status}.`;
+            const el = $("tool-status");
+            if (el) el.textContent = status;
+          }
+          if (parsed.thinking && parsed.thinking.visible && parsed.thinking.content) {
+            const article = assistantContent.closest(".message");
+            if (article) renderThinking(article.querySelector(".thinking-slot"), "assistant", parsed.thinking.content);
+          }
           if (parsed.context) {
             state.contextMessage = parsed.context.message || "";
             showContextStatus(state.contextMessage);

@@ -75,7 +75,7 @@ class ChatRepository(context: Context) {
         getChat(userId, chatId) ?: return null
         database.readableDatabase.rawQuery(
             """
-            SELECT id, chat_id, role, content, created_at_ms
+            SELECT id, chat_id, role, content, created_at_ms, thinking_text, raw_content
             FROM messages
             WHERE chat_id = ?
             ORDER BY created_at_ms ASC
@@ -91,13 +91,15 @@ class ChatRepository(context: Context) {
     }
 
     @Synchronized
-    fun addMessage(chatId: String, role: String, content: String, createdAtMs: Long = System.currentTimeMillis()): MessageRecord {
+    fun addMessage(chatId: String, role: String, content: String, createdAtMs: Long = System.currentTimeMillis(), thinking: String? = null, rawContent: String? = null): MessageRecord {
         val message = MessageRecord(
             id = UUID.randomUUID().toString(),
             chatId = chatId,
             role = role,
             content = content,
             createdAtMs = createdAtMs,
+            thinking = thinking,
+            rawContent = rawContent,
         )
         database.writableDatabase.insertOrThrow(
             "messages",
@@ -108,6 +110,8 @@ class ChatRepository(context: Context) {
                 put("role", message.role)
                 put("content", message.content)
                 put("created_at_ms", message.createdAtMs)
+                put("thinking_text", message.thinking)
+                put("raw_content", message.rawContent)
             }
         )
         touchChat(chatId, createdAtMs)
@@ -270,6 +274,8 @@ class ChatRepository(context: Context) {
             role = getString(2),
             content = getString(3),
             createdAtMs = getLong(4),
+            thinking = if (isNull(5)) null else getString(5),
+            rawContent = if (isNull(6)) null else getString(6),
         )
     }
 

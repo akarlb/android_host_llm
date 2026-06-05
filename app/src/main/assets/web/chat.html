@@ -23,6 +23,17 @@
       <div id="chat-list" class="chat-list"></div>
     </aside>
     <main class="chat-main">
+      <section class="chat-controls" aria-label="Chat controls">
+        <label>Skill:
+          <select id="skill-select"></select>
+        </label>
+        <label class="thinking-toggle">
+          <input id="show-thinking-toggle" type="checkbox">
+          Show thinking
+        </label>
+        <span id="skill-status" class="context-status" aria-live="polite"></span>
+      </section>
+      <div id="tool-status" class="tool-status" aria-live="polite"></div>
       <div id="messages" class="messages"></div>
       <form id="message-form" class="composer">
         <div id="selected-files" class="selected-files"></div>

@@ -43,6 +43,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         createFileTables(db)
         createChatFileContextStateTable(db)
         createChatFileAttachmentTable(db)
+        createSkillTables(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -57,6 +58,10 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         }
         if (oldVersion < 5) {
             createChatFileAttachmentTable(db)
+        }
+        if (oldVersion < 6) {
+            createSkillTables(db)
+            addMessageThinkingColumns(db)
         }
     }
 
@@ -81,7 +86,9 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
                 chat_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                created_at_ms INTEGER NOT NULL
+                created_at_ms INTEGER NOT NULL,
+                thinking_text TEXT NULL,
+                raw_content TEXT NULL
             )
             """.trimIndent()
         )
@@ -151,8 +158,66 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE INDEX IF NOT EXISTS chat_file_attachments_file_idx ON chat_file_attachments(file_id)")
     }
 
+
+    private fun createSkillTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS skills (
+                id TEXT PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                system_prompt TEXT NOT NULL,
+                response_mode TEXT NULL,
+                thinking_default INTEGER NOT NULL DEFAULT 0,
+                show_thinking_default INTEGER NOT NULL DEFAULT 0,
+                tool_use_mode TEXT NOT NULL DEFAULT 'NONE',
+                allowed_tools_json TEXT NOT NULL DEFAULT '[]',
+                output_schema_json TEXT NULL,
+                strict_output INTEGER NOT NULL DEFAULT 0,
+                built_in INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS chat_skill_state (
+                chat_id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL,
+                thinking_enabled INTEGER NOT NULL DEFAULT 0,
+                show_thinking INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS tool_call_log (
+                id TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                message_id TEXT NULL,
+                tool_name TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                result_json TEXT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT NULL,
+                created_at_ms INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS tool_call_log_chat_created_idx ON tool_call_log(chat_id, created_at_ms)")
+    }
+
+    private fun addMessageThinkingColumns(db: SQLiteDatabase) {
+        runCatching { db.execSQL("ALTER TABLE messages ADD COLUMN thinking_text TEXT NULL") }
+        runCatching { db.execSQL("ALTER TABLE messages ADD COLUMN raw_content TEXT NULL") }
+    }
+
     private companion object {
         const val DATABASE_NAME = "android_host_llm.db"
-        const val DATABASE_VERSION = 5
+        const val DATABASE_VERSION = 6
     }
 }

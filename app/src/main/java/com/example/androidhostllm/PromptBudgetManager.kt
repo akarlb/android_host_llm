@@ -107,6 +107,10 @@ class PromptBudgetManager {
         )
     }
 
+    fun limitFinalPrompt(prompt: String): String {
+        return if (prompt.length > MAX_FINAL_PROMPT_CHARS) prompt.take(MAX_FINAL_PROMPT_CHARS - 16) + "\nassistant:" else prompt
+    }
+
     fun isTokenOverflow(error: Throwable): Boolean {
         val message = error.message.orEmpty().lowercase(Locale.US)
         return TOKEN_OVERFLOW_PATTERNS.any { it in message }
