@@ -6,67 +6,81 @@ Branch: `codex/orchestration/phase1-api-security-foundation`
 
 ## Summary
 
-Phase 1 started and completed the required preimplementation audit. A first backend hardening slice was implemented, but the phase is blocked before completion because the required APK compile gate cannot run in this environment.
-
-This branch must not be merged into the orchestration branch yet.
+Phase 1 established a contract-driven, security-aware backend baseline for the local phone-hosted app. The work stayed within local/trusted-LAN scope and did not add relay, cloud, cellular, or public internet architecture.
 
 ## Files Changed
 
-- `docs/audits/current/phase1_preimplementation_audit.md`
+- `README.md`
 - `app/src/main/java/com/example/androidhostllm/AuthModels.kt`
 - `app/src/main/java/com/example/androidhostllm/AuthRepository.kt`
 - `app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt`
 - `app/src/main/java/com/example/androidhostllm/MainActivity.kt`
 - `app/src/main/java/com/example/androidhostllm/SecurityMode.kt`
+- `docs/api/api_contract.md`
+- `docs/security/route_auth_matrix.md`
+- `docs/audits/current/phase1_preimplementation_audit.md`
+- `docs/audits/current/phase1_completion_audit.md`
+- `test_auth_foundation.sh`
 - `docs/agentic_orchestration/orchestration_state.md`
 - `docs/agentic_orchestration/orchestration_log.md`
 - `docs/agentic_orchestration/orchestration_blockers.md`
 
 ## Routes/APIs Changed
 
-- Added `POST /auth/logout-all` for invalidating all sessions belonging to the current user.
 - Added explicit `LOCAL_DEV` and `TRUSTED_LAN` security mode mapping.
-- Added `X-Request-Id` to responses produced through the shared response path.
-- Added structured `errorDetails` and `requestId` to JSON error responses while preserving the legacy top-level `error` string.
-- Expanded `/health` with `appAlive`, `databaseAvailable`, `storageWritable`, `securityMode`, and diagnostic mode fields.
-- Gated `/debug/*` diagnostics behind admin auth in `TRUSTED_LAN`.
+- Added `POST /auth/logout-all` to invalidate all sessions for the current user.
+- Added absolute session expiry and idle timeout enforcement.
+- Added failed-login backoff by normalized username.
+- Added `X-Request-Id` response headers through shared response helpers.
+- Added structured JSON error details while preserving the legacy top-level `error` string.
+- Expanded `/health` with `appAlive`, `databaseAvailable`, `storageWritable`, `securityMode`, `serverMode`, and diagnostic mode fields.
+- Required admin auth for `/debug/*` diagnostics in `TRUSTED_LAN`.
 
 ## Frontend Changes
 
-- Native Android server mode label now passes `LOCAL_DEV` for localhost mode and `TRUSTED_LAN` for LAN mode.
-- Static web assets were not changed.
+- Native Android server launch now passes `LOCAL_DEV` for localhost mode and `TRUSTED_LAN` for LAN mode.
+- Static web assets were not redesigned. Existing frontend parsing remains compatible because top-level `error`, `token`, and `user` fields were preserved.
 
 ## Tests Run
 
 Passed:
-- `git diff --check`
-- `bash -n test_auth_foundation.sh`
-- `bash -n test_mvp_full_stack.sh`
-- `bash -n test_skills_tools_thinking.sh`
-- `bash -n test_chat_scoped_files_and_markdown.sh`
 
-Blocked:
-- `./gradlew clean assembleDebug`
+```sh
+git diff --check
+bash -n test_auth_foundation.sh
+bash -n test_mvp_full_stack.sh
+bash -n test_skills_tools_thinking.sh
+bash -n test_chat_scoped_files_and_markdown.sh
+bash -n test_admin_ui.sh
+bash -n test_chat_api.sh
+bash -n test_web_ui_smoke.sh
+ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug
+ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test
+ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew lint
+ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew check
+```
 
-Exact blocker:
+APK compile result:
 
 ```text
-ERROR: Gradle is required but was not found on PATH.
-
-Install Gradle 8.9+ and JDK 17, then rerun:
-  ./gradlew clean assembleDebug
-
-Alternatively set GRADLE_CMD to an explicit Gradle executable path, for example:
-  GRADLE_CMD=/opt/gradle/bin/gradle ./gradlew clean assembleDebug
+BUILD SUCCESSFUL in 47s
+36 actionable tasks: 36 executed
 ```
+
+## Blocked Or Skipped Tests
+
+Skipped:
+
+- Live phone-server regression scripts were not executed because no running Android phone server/model-loaded environment is available in this local shell.
+- Instrumented/device tests were not run because no emulator/device requirement exists for this orchestration and no device was used.
 
 ## Known Limitations
 
-- Phase 1 API contract and route matrix are not yet written.
-- The first backend slice has not been APK-compiled.
-- Live server validation was not attempted because compile is blocked first.
-- No phase merge has occurred.
+- OpenAI-compatible model routes remain open by default for MVP local/LAN client compatibility unless API-key enforcement is enabled by native server configuration.
+- Failed-login backoff is process-local and resets if the Android app process restarts.
+- Session expiry/idle timeout are enforced on session lookup; there is no background session sweeper.
+- `TRUSTED_LAN` is still for trusted local networks only, not public internet exposure.
 
 ## Recommendation For Next Phase
 
-Do not start Phase 2. Install or provide Gradle, rerun the Phase 1 APK compile gate, then continue Phase 1 from this branch.
+Phase 1 is safe to merge into `codex/orchestration-phases-1-7` after the final branch status check and compile gate. Continue to Phase 2 only from the merged orchestration branch.

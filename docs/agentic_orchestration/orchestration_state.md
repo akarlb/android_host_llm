@@ -3,8 +3,8 @@ Current phase: Phase 1
 Current phase branch: codex/orchestration/phase1-api-security-foundation
 Last completed phase: none
 Next phase: Phase 1
-APK compile status: blocked; ./gradlew clean assembleDebug cannot run because Gradle is not installed on PATH and no alternate Gradle executable was found
-Spec/check status: preimplementation audit complete; partial Phase 1 security/session/request-id slice implemented but not APK-compiled
-Blocked: yes
-Blocker summary: Missing Gradle executable prevents the required APK compile hard gate. Java 17 is present, but ./gradlew delegates to a system Gradle binary and exits 127 when Gradle is unavailable.
-Last updated: 2026-06-06T17:42:51+02:00
+APK compile status: passed on phase branch with ANDROID_HOME=/tmp/android-sdk and GRADLE_CMD=/tmp/gradle-8.9/bin/gradle
+Spec/check status: Phase 1 implementation, docs, script syntax, test, lint, and check passed; final merge pending
+Blocked: no
+Blocker summary: prior Gradle path blocker resolved by using /tmp/gradle-8.9/bin/gradle and /tmp/android-sdk
+Last updated: 2026-06-06T17:55:09+02:00

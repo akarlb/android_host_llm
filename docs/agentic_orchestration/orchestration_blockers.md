@@ -33,3 +33,9 @@ Required fix:
 - Install Gradle 8.9+ on PATH, or set `GRADLE_CMD` to a valid Gradle executable.
 - From `codex/orchestration/phase1-api-security-foundation`, rerun `./gradlew clean assembleDebug`.
 - Continue Phase 1 only after APK compilation is available and passes.
+
+Resolution:
+- Resolved on 2026-06-06T17:55:09+02:00.
+- Found Gradle at `/tmp/gradle-8.9/bin/gradle`.
+- Found Android SDK at `/tmp/android-sdk`.
+- `ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug` passed.
