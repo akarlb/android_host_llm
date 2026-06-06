@@ -225,3 +225,48 @@ Results:
 
 Next action:
 - Commit this state update and create `codex/orchestration/phase2-admin-skills-tools-control-center`.
+
+## 2026-06-06T18:09:55+02:00
+
+Branch: codex/orchestration/phase2-admin-skills-tools-control-center
+
+Phase: Phase 2
+
+Action taken:
+- Added admin backend endpoints for full skill management, custom skill import/export, skill testing, and global tool logs.
+- Upgraded `/admin` into the requested skills/tools control center.
+- Updated API contract and route/auth matrix.
+- Updated admin smoke script coverage for new endpoints.
+- Ran syntax checks, Gradle test, lint, check, and the APK compile gate.
+
+Files changed:
+- app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt
+- app/src/main/java/com/example/androidhostllm/SkillRepository.kt
+- app/src/main/assets/web/admin.html
+- app/src/main/assets/web/app.js
+- app/src/main/assets/web/styles.css
+- docs/api/api_contract.md
+- docs/security/route_auth_matrix.md
+- docs/audits/current/phase2_preimplementation_audit.md
+- docs/audits/current/phase2_admin_skills_tools_control_center_handoff.md
+- docs/audits/current/phase2_completion_audit.md
+- test_admin_ui.sh
+
+Checks run:
+- git diff --check
+- bash -n test_admin_ui.sh
+- bash -n test_skills_tools_thinking.sh
+- bash -n test_auth_foundation.sh
+- bash -n test_mvp_full_stack.sh
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew lint
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew check
+
+Results:
+- All listed checks passed.
+- APK compile passed.
+- Live phone-server validation skipped because no running phone server/model-loaded environment exists.
+
+Next action:
+- Commit Phase 2, run final branch checks, and merge into `codex/orchestration-phases-1-7`.

@@ -94,6 +94,19 @@ class SkillRepository(context: Context) {
     fun upsertCustomSkill(json: JSONObject, existingSlug: String? = null): SkillRecord? {
         val slug = (existingSlug ?: json.optString("slug")).trim().lowercase().takeIf { it.matches(Regex("[a-z0-9][a-z0-9-]{0,63}")) } ?: return null
         val existing = getSkillBySlug(slug, enabledOnly = false)
+        if (existing?.builtIn == true) {
+            val now = System.currentTimeMillis()
+            database.writableDatabase.update(
+                "skills",
+                ContentValues().apply {
+                    if (json.has("enabled")) put("enabled", if (json.optBoolean("enabled")) 1 else 0)
+                    put("updated_at_ms", now)
+                },
+                "slug = ?",
+                arrayOf(slug)
+            )
+            return getSkillBySlug(slug, enabledOnly = false)
+        }
         val now = System.currentTimeMillis()
         val skill = SkillRecord(
             id = existing?.id ?: UUID.randomUUID().toString(),
@@ -128,6 +141,29 @@ class SkillRepository(context: Context) {
     }
 
     @Synchronized
+    fun exportCustomSkills(): JSONArray {
+        val array = JSONArray()
+        listSkills(enabledOnly = false).filterNot { it.builtIn }.forEach { skill ->
+            array.put(skillExportJson(skill))
+        }
+        return array
+    }
+
+    @Synchronized
+    fun importCustomSkills(array: JSONArray): Pair<Int, String?> {
+        var imported = 0
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: return imported to "Item $index is not an object"
+            val slug = item.optString("slug").trim().lowercase()
+            val existing = getSkillBySlug(slug, enabledOnly = false)
+            if (existing?.builtIn == true) return imported to "Cannot overwrite built-in skill: $slug"
+            if (upsertCustomSkill(item) == null) return imported to "Invalid skill at item $index"
+            imported += 1
+        }
+        return imported to null
+    }
+
+    @Synchronized
     fun insertToolLog(chatId: String, messageId: String?, toolName: String, requestJson: JSONObject, resultJson: JSONObject?, status: ToolCallStatus, error: String? = null): ToolCallLogRecord {
         val log = ToolCallLogRecord(UUID.randomUUID().toString(), chatId, messageId, toolName, requestJson.toString(), resultJson?.toString(), status, error, System.currentTimeMillis())
         database.writableDatabase.insertOrThrow("tool_call_log", null, ContentValues().apply {
@@ -150,6 +186,49 @@ class SkillRepository(context: Context) {
             )
             return logs
         }
+    }
+
+    @Synchronized
+    fun listRecentToolLogs(limit: Int = 100): List<ToolCallLogRecord> {
+        database.readableDatabase.rawQuery(
+            """
+            SELECT id, chat_id, message_id, tool_name, request_json, result_json, status, error_message, created_at_ms
+            FROM tool_call_log
+            ORDER BY created_at_ms DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf(limit.coerceIn(1, 200).toString())
+        ).use { cursor ->
+            val logs = mutableListOf<ToolCallLogRecord>()
+            while (cursor.moveToNext()) logs += ToolCallLogRecord(
+                cursor.getString(0),
+                cursor.getString(1),
+                if (cursor.isNull(2)) null else cursor.getString(2),
+                cursor.getString(3),
+                cursor.getString(4),
+                if (cursor.isNull(5)) null else cursor.getString(5),
+                runCatching { ToolCallStatus.valueOf(cursor.getString(6)) }.getOrDefault(ToolCallStatus.FAILED),
+                if (cursor.isNull(7)) null else cursor.getString(7),
+                cursor.getLong(8)
+            )
+            return logs
+        }
+    }
+
+    private fun skillExportJson(skill: SkillRecord): JSONObject {
+        return JSONObject()
+            .put("slug", skill.slug)
+            .put("displayName", skill.displayName)
+            .put("description", skill.description)
+            .put("systemPrompt", skill.systemPrompt)
+            .put("responseMode", skill.responseMode ?: JSONObject.NULL)
+            .put("thinkingDefault", skill.thinkingDefault)
+            .put("showThinkingDefault", skill.showThinkingDefault)
+            .put("toolUseMode", skill.toolUseMode.name)
+            .put("allowedTools", JSONArray(skill.allowedTools))
+            .put("outputSchema", skill.outputSchemaJson?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject.NULL)
+            .put("strictOutput", skill.strictOutput)
+            .put("enabled", skill.enabled)
     }
 
     private fun findChatSkillState(chatId: String): ChatSkillStateRecord? {

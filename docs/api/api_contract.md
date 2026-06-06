@@ -321,6 +321,10 @@ Response: `{"files":[{"id":"...","username":"alice","filename":"notes.md","sizeB
 
 Response includes admin tool metadata, danger levels, allowed skills, and schemas.
 
+### `GET /api/admin/tools/logs`
+
+Returns recent tool calls across chats with chat/message references, status, error, and sanitized request/result previews.
+
 ### `POST /api/admin/skills`
 
 Request: custom skill JSON with slug/display/prompt/tool settings.
@@ -334,6 +338,28 @@ Updates a custom skill.
 ### `DELETE /api/admin/skills/{slug}`
 
 Disables or deletes a skill.
+
+### `GET /api/admin/skills`
+
+Returns all skills, including disabled skills and built-in/custom metadata. Admin responses include system prompts and output schemas.
+
+### `GET /api/admin/skills/export`
+
+Exports custom skills as `{"skills":[...]}`. Built-in skills are excluded.
+
+### `POST /api/admin/skills/import`
+
+Imports custom skills from `{"skills":[...]}`. Built-in overwrite is rejected.
+
+### `POST /api/admin/skills/test`
+
+Request:
+
+```json
+{"skillSlug":"default","prompt":"Test prompt"}
+```
+
+Runs an admin-only one-off model test without creating a normal user chat. Returns `503` if the model is not loaded.
 
 Admin errors:
 

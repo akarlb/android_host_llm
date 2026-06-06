@@ -88,6 +88,10 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/api/admin/status" -> adminStatusResponse(session)
             session.method == Method.GET && path == "/api/admin/users" -> adminUsersResponse(session)
             session.method == Method.GET && path == "/api/admin/files" -> adminFilesResponse(session)
+            session.method == Method.GET && path == "/api/admin/skills" -> adminSkillsResponse(session)
+            session.method == Method.GET && path == "/api/admin/skills/export" -> adminExportSkillsResponse(session)
+            session.method == Method.POST && path == "/api/admin/skills/import" -> adminImportSkillsResponse(session)
+            session.method == Method.POST && path == "/api/admin/skills/test" -> adminSkillTestResponse(session)
             session.method == Method.GET && path == "/api/skills" -> listSkillsResponse(session)
             session.method == Method.GET && skillSlug != null -> getSkillResponse(session, skillSlug)
             session.method == Method.POST && path == "/api/admin/skills" -> adminCreateSkillResponse(session)
@@ -95,6 +99,7 @@ class LocalHttpServer(
             session.method == Method.DELETE && adminSkillSlug != null -> adminDeleteSkillResponse(session, adminSkillSlug)
             session.method == Method.GET && path == "/api/tools" -> listToolsResponse(session, admin = false)
             session.method == Method.GET && path == "/api/admin/tools" -> listToolsResponse(session, admin = true)
+            session.method == Method.GET && path == "/api/admin/tools/logs" -> adminToolLogsResponse(session)
             session.method == Method.GET && path == "/api/chats" -> listChatsResponse(session)
             session.method == Method.POST && path == "/api/chats" -> createChatResponse(session)
             session.method == Method.GET && path == "/api/files" -> listFilesResponse(session)
@@ -269,6 +274,7 @@ class LocalHttpServer(
                     .put("adminFiles", "GET /api/admin/files")
                     .put("adminSkills", "POST/PUT/DELETE /api/admin/skills")
                     .put("adminTools", "GET /api/admin/tools")
+                    .put("adminToolLogs", "GET /api/admin/tools/logs")
                     .put("resetConversation", "POST /v1/conversation/reset")
                     .put("performance", "GET /debug/perf")
                     .put("performanceHistory", "GET /debug/perf/history")
@@ -549,6 +555,65 @@ class LocalHttpServer(
         }
     }
 
+    private fun adminSkillsResponse(session: IHTTPSession): Response = withAdmin(session) {
+        val skills = JSONArray()
+        skillRepository.listSkills(enabledOnly = false).forEach { skills.put(skillJson(it, includePrompt = true)) }
+        jsonResponse(Response.Status.OK, JSONObject().put("skills", skills))
+    }
+
+    private fun adminExportSkillsResponse(session: IHTTPSession): Response = withAdmin(session) {
+        jsonResponse(Response.Status.OK, JSONObject().put("skills", skillRepository.exportCustomSkills()))
+    }
+
+    private fun adminImportSkillsResponse(session: IHTTPSession): Response = withAdmin(session) {
+        val json = readJsonRequest(session) ?: return@withAdmin errorResponse(Response.Status.BAD_REQUEST, "bad_json", "Malformed JSON")
+        val array = json.optJSONArray("skills") ?: return@withAdmin errorResponse(Response.Status.BAD_REQUEST, "invalid_skills", "skills must be an array")
+        val (imported, error) = skillRepository.importCustomSkills(array)
+        if (error != null) return@withAdmin errorResponse(Response.Status.BAD_REQUEST, "invalid_skill_import", error)
+        jsonResponse(Response.Status.OK, JSONObject().put("status", "ok").put("imported", imported))
+    }
+
+    private fun adminSkillTestResponse(session: IHTTPSession): Response = withAdmin(session) {
+        val json = readJsonRequest(session) ?: return@withAdmin errorResponse(Response.Status.BAD_REQUEST, "bad_json", "Malformed JSON")
+        val slug = json.optString("skillSlug").trim().takeIf { it.isNotBlank() }
+            ?: return@withAdmin errorResponse(Response.Status.BAD_REQUEST, "missing_skill", "skillSlug is required")
+        val prompt = json.optString("prompt").trim().takeIf { it.isNotBlank() }
+            ?: return@withAdmin errorResponse(Response.Status.BAD_REQUEST, "missing_prompt", "prompt is required")
+        val skill = skillRepository.getSkillBySlug(slug) ?: return@withAdmin notFoundResponse()
+        if (!liteRtLmManager.isLoaded()) {
+            return@withAdmin errorResponse(Response.Status.SERVICE_UNAVAILABLE, "model_not_loaded", "Model is not loaded")
+        }
+        val responseMode = responseModeForSkill(skill, ChatProfile.CUSTOM)
+        val testPrompt = buildString {
+            appendLine(skill.systemPrompt)
+            appendLine()
+            appendLine("Admin skill test prompt:")
+            appendLine(prompt)
+            append("assistant:")
+        }
+        val output = runBlocking {
+            liteRtLmManager.generate(
+                prompt = liteRtLmManager.applyResponseModeHint(testPrompt, responseMode),
+                conversationModeOverride = ConversationMode.FRESH_PER_REQUEST,
+                responseModeOverride = responseMode,
+            )
+        }
+        output.fold(
+            onSuccess = {
+                jsonResponse(
+                    Response.Status.OK,
+                    JSONObject()
+                        .put("status", "ok")
+                        .put("skill", skillJson(skill, includePrompt = false))
+                        .put("response", parseAndValidateResponse(skill, it, prompt).finalText)
+                )
+            },
+            onFailure = {
+                jsonResponse(Response.Status.INTERNAL_ERROR, JSONObject().put("error", it.message ?: "Skill test failed"))
+            }
+        )
+    }
+
     private fun listChatsResponse(session: IHTTPSession): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val chats = JSONArray()
@@ -732,6 +797,14 @@ class LocalHttpServer(
         jsonResponse(Response.Status.OK, JSONObject().put("status", "ok"))
     }
 
+    private fun adminToolLogsResponse(session: IHTTPSession): Response = withAdmin(session) {
+        val logs = JSONArray()
+        skillRepository.listRecentToolLogs().forEach { log ->
+            logs.put(toolLogJson(log))
+        }
+        jsonResponse(Response.Status.OK, JSONObject().put("logs", logs))
+    }
+
     private fun getChatSkillResponse(session: IHTTPSession, chatId: String): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
@@ -773,7 +846,7 @@ class LocalHttpServer(
         chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
         val logs = JSONArray()
         skillRepository.listToolLogs(chatId).forEach { log ->
-            logs.put(JSONObject().put("id", log.id).put("toolName", log.toolName).put("status", log.status.name).put("errorMessage", log.errorMessage ?: JSONObject.NULL).put("createdAtMs", log.createdAtMs))
+            logs.put(toolLogJson(log))
         }
         return jsonResponse(Response.Status.OK, JSONObject().put("logs", logs))
     }
@@ -1665,6 +1738,25 @@ class LocalHttpServer(
             .put("enabled", tool.enabled)
         if (admin) json.put("dangerLevel", tool.dangerLevel).put("allowedForSkills", JSONArray(tool.allowedForSkills)).put("inputSchema", tool.inputSchema).put("outputSchema", tool.outputSchema)
         return json
+    }
+
+    private fun toolLogJson(log: ToolCallLogRecord): JSONObject {
+        return JSONObject()
+            .put("id", log.id)
+            .put("chatId", log.chatId)
+            .put("messageId", log.messageId ?: JSONObject.NULL)
+            .put("toolName", log.toolName)
+            .put("status", log.status.name)
+            .put("errorMessage", log.errorMessage ?: JSONObject.NULL)
+            .put("requestPreview", sanitizeJsonPreview(log.requestJson))
+            .put("resultPreview", log.resultJson?.let { sanitizeJsonPreview(it) } ?: JSONObject.NULL)
+            .put("createdAtMs", log.createdAtMs)
+    }
+
+    private fun sanitizeJsonPreview(value: String): String {
+        return value
+            .replace(Regex("(?i)(password|token|apiKey|huggingFaceToken|hfToken|storage_path|storagePath)\"\\s*:\\s*\"[^\"]*\""), "$1\":\"[redacted]\"")
+            .take(600)
     }
 
     private fun fileJson(file: UploadedFileRecord): JSONObject {

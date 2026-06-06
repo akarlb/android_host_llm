@@ -38,6 +38,11 @@ Security modes:
 | `GET /api/admin/users` | Admin | Admin-only | Admin-only | User ids/names/roles/counts, no password/session fields | Medium |
 | `GET /api/admin/files` | Admin | Admin-only | Admin-only | File ownership metadata, no raw storage paths | Medium |
 | `GET /api/admin/tools` | Admin | Admin-only | Admin-only | Tool schemas and danger metadata | Medium |
+| `GET /api/admin/tools/logs` | Admin | Admin-only | Admin-only | Sanitized tool call previews | Medium |
+| `GET /api/admin/skills` | Admin | Admin-only | Admin-only | Full skill prompt/schema metadata | High |
+| `GET /api/admin/skills/export` | Admin | Admin-only | Admin-only | Custom skill definitions | High |
+| `POST /api/admin/skills/import` | Admin | Admin-only | Admin-only | Imports custom skill definitions | High |
+| `POST /api/admin/skills/test` | Admin | Admin-only | Admin-only | Test prompt and model output | High |
 | `POST/PUT/DELETE /api/admin/skills` | Admin | Admin-only skill control | Admin-only skill control | Full skill prompt/schema metadata | High |
 | `GET /v1/models` `/coding/v1/models` `/conversation/v1/models` `/models` | Public unless API-key enforcement enabled | Open for MVP client compatibility | Open for trusted LAN client compatibility | Model id only | Low |
 | `POST /v1/chat/completions` | Public unless API-key enforcement enabled | OpenAI-compatible generation | Same; no relay/public exposure | Prompt and model output | High |

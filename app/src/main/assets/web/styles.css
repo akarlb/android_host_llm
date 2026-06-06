@@ -544,6 +544,65 @@ th {
   padding: 10px;
 }
 
+.admin-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.admin-form {
+  display: grid;
+  gap: 10px;
+}
+
+.checkbox-row {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.json-box {
+  min-height: 110px;
+  margin-top: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.tool-catalog {
+  display: grid;
+  gap: 10px;
+}
+
+.tool-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.tool-card pre,
+.recent-file pre,
+.console-output {
+  overflow-x: auto;
+  border-radius: 6px;
+  background: #18202a;
+  color: #f8fafc;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -570,7 +629,8 @@ th {
   }
 
   .status-grid,
-  .url-row {
+  .url-row,
+  .admin-grid {
     grid-template-columns: 1fr;
   }
 }
