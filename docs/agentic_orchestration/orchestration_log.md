@@ -326,3 +326,49 @@ Results:
 
 Next action:
 - Commit this state update and create `codex/orchestration/phase3-generation-reliability`.
+
+## 2026-06-06T18:26:05+02:00
+
+Branch: codex/orchestration/phase3-generation-reliability
+
+Phase: Phase 3
+
+Action taken:
+- Added bounded in-memory generation job tracking.
+- Added app-chat generation status, cancel, and retry endpoints.
+- Wired generation metadata into streaming and non-streaming app chat.
+- Added chat UI Stop and Retry controls.
+- Updated API contract, route matrix, preimplementation audit, completion audit, and handoff.
+- Ran syntax checks, Gradle test, lint, check, and the APK compile gate.
+
+Files changed:
+- app/src/main/java/com/example/androidhostllm/GenerationJobs.kt
+- app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt
+- app/src/main/assets/web/chat.html
+- app/src/main/assets/web/app.js
+- app/src/main/assets/web/styles.css
+- docs/api/api_contract.md
+- docs/security/route_auth_matrix.md
+- docs/audits/current/phase3_preimplementation_audit.md
+- docs/audits/current/phase3_generation_reliability_handoff.md
+- docs/audits/current/phase3_completion_audit.md
+
+Checks run:
+- git diff --check
+- bash -n test_chat_api.sh
+- bash -n test_mvp_full_stack.sh
+- bash -n test_web_ui_smoke.sh
+- bash -n test_auth_foundation.sh
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew lint
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew check
+
+Results:
+- All listed checks passed.
+- APK compile passed.
+- One invalid `check` attempt failed because it was run concurrently with `clean assembleDebug`; standalone rerun passed.
+- Live phone-server validation skipped because no running phone server/model-loaded environment exists.
+
+Next action:
+- Commit Phase 3, run final branch checks, and merge into `codex/orchestration-phases-1-7`.

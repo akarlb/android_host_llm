@@ -13,6 +13,7 @@
     adminTools: [],
     adminToolLogs: [],
     selectedAdminSkill: null,
+    currentGenerationId: null,
     streaming: false,
     contextMessage: "",
     toolStatus: "",
@@ -139,6 +140,8 @@
     $("skill-select").addEventListener("change", () => changeSkill($("skill-select").value));
     $("show-thinking-toggle").addEventListener("change", () => updateThinkingToggle($("show-thinking-toggle").checked));
     $("message-form").addEventListener("submit", sendMessage);
+    $("stop-button").addEventListener("click", stopGeneration);
+    $("retry-button").addEventListener("click", retryGeneration);
     $("message-input").addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !state.streaming) {
         event.preventDefault();
@@ -411,7 +414,10 @@
       content = command.trailing;
     }
     state.streaming = true;
+    state.currentGenerationId = null;
     $("send-button").disabled = true;
+    $("stop-button").hidden = false;
+    $("retry-button").disabled = true;
     input.setAttribute("aria-busy", "true");
     input.value = "";
     appendMessage("user", content, { final: true });
@@ -427,8 +433,50 @@
       assistantContent.textContent = error.message;
     } finally {
       state.streaming = false;
+      state.currentGenerationId = null;
       $("send-button").disabled = false;
+      $("stop-button").hidden = true;
+      $("retry-button").disabled = false;
       input.removeAttribute("aria-busy");
+    }
+  }
+
+  async function stopGeneration() {
+    if (!state.currentChatId) return;
+    const path = state.currentGenerationId
+      ? `/api/generations/${encodeURIComponent(state.currentGenerationId)}/cancel`
+      : `/api/chats/${encodeURIComponent(state.currentChatId)}/generation/cancel`;
+    try {
+      await jsonRequest(path, { method: "POST", body: "{}" });
+      showError("chat-error", "Generation stopped.");
+    } catch (error) {
+      showError("chat-error", error.message);
+    }
+  }
+
+  async function retryGeneration() {
+    if (!state.currentChatId || state.streaming) return;
+    showError("chat-error", "");
+    state.streaming = true;
+    $("send-button").disabled = true;
+    $("retry-button").disabled = true;
+    try {
+      const result = await jsonRequest(`/api/chats/${encodeURIComponent(state.currentChatId)}/generation/retry`, {
+        method: "POST",
+        body: "{}",
+      });
+      if (result.message) {
+        state.messages.push(result.message);
+        renderMessages();
+      } else {
+        await openChat(state.currentChatId);
+      }
+    } catch (error) {
+      showError("chat-error", error.message);
+    } finally {
+      state.streaming = false;
+      $("send-button").disabled = false;
+      $("retry-button").disabled = false;
     }
   }
 
@@ -479,6 +527,7 @@
           }
           const parsed = JSON.parse(payload);
           if (parsed.error) throw new Error(parsed.error.message || parsed.error);
+          if (parsed.generation) state.currentGenerationId = parsed.generation.id;
           if (parsed.skill) {
             state.currentSkill = parsed.skill;
             renderSkillControls();

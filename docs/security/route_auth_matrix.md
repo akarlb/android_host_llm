@@ -23,6 +23,11 @@ Security modes:
 | `GET /api/chats/{chatId}` | Chat owner | Own chat/messages/files; other users receive `404` | Same | User chat content | High |
 | `DELETE /api/chats/{chatId}` | Chat owner | Archive own chat | Same | Status only | Medium |
 | `POST /api/chats/{chatId}/messages` | Chat owner | Generate model response and persist messages | Same | Prompt, selected file context metadata, model output | High |
+| `GET /api/chats/{chatId}/generations` | Chat owner | List recent generation jobs | Same | Generation status and output metadata | Medium |
+| `POST /api/chats/{chatId}/generation/cancel` | Chat owner | Cancel active chat generation | Same | Generation status | Medium |
+| `POST /api/chats/{chatId}/generation/retry` | Chat owner | Retry latest user message | Same | Prompt/model output | High |
+| `GET /api/generations/{generationId}` | Generation owner | Read generation status | Same | Generation status/error/output | Medium |
+| `POST /api/generations/{generationId}/cancel` | Generation owner | Cancel generation | Same | Generation status | Medium |
 | `GET/POST /api/chats/{chatId}/files` | Chat owner | List/attach own files | Same | File metadata | Medium |
 | `DELETE /api/chats/{chatId}/files/{fileId}` | Chat owner | Detach own file | Same | Status only | Low |
 | `GET /api/files` | Authenticated | Own file list | Same | File metadata | Medium |

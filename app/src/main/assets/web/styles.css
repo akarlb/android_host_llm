@@ -356,6 +356,12 @@ textarea {
   align-items: end;
 }
 
+.send-actions {
+  display: grid;
+  gap: 8px;
+  min-width: 84px;
+}
+
 .attach-button {
   display: grid;
   place-items: center;

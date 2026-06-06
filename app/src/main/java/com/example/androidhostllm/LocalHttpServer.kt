@@ -45,6 +45,7 @@ class LocalHttpServer(
     private val promptBudgetManager = PromptBudgetManager()
     private val skillRepository = SkillRepository(appContext)
     private val toolRegistry = ToolRegistry(chatRepository, fileRepository)
+    private val generationJobs = GenerationJobStore()
     private val securityMode = SecurityMode.fromServerMode(serverMode)
     private val requestId = ThreadLocal<String>()
 
@@ -58,6 +59,11 @@ class LocalHttpServer(
         val chatFilesChatId = chatFilesChatIdFromPath(path)
         val chatSkillChatId = chatSkillChatIdFromPath(path)
         val chatToolLogsChatId = chatToolLogsChatIdFromPath(path)
+        val chatGenerationCancelId = chatGenerationCancelIdFromPath(path)
+        val chatGenerationRetryId = chatGenerationRetryIdFromPath(path)
+        val chatGenerationListId = chatGenerationListIdFromPath(path)
+        val generationCancelId = generationCancelIdFromPath(path)
+        val generationId = generationIdFromPath(path)
         val adminSkillSlug = adminSkillSlugFromPath(path)
         val skillSlug = skillSlugFromPath(path)
         val chatFileAttachment = chatFileAttachmentFromPath(path)
@@ -107,6 +113,11 @@ class LocalHttpServer(
             session.method == Method.GET && chatSkillChatId != null -> getChatSkillResponse(session, chatSkillChatId)
             session.method == Method.PUT && chatSkillChatId != null -> putChatSkillResponse(session, chatSkillChatId)
             session.method == Method.GET && chatToolLogsChatId != null -> chatToolLogsResponse(session, chatToolLogsChatId)
+            session.method == Method.GET && chatGenerationListId != null -> listGenerationsResponse(session, chatGenerationListId)
+            session.method == Method.POST && chatGenerationCancelId != null -> cancelChatGenerationResponse(session, chatGenerationCancelId)
+            session.method == Method.POST && chatGenerationRetryId != null -> retryChatGenerationResponse(session, chatGenerationRetryId)
+            session.method == Method.POST && generationCancelId != null -> cancelGenerationResponse(session, generationCancelId)
+            session.method == Method.GET && generationId != null -> getGenerationResponse(session, generationId)
             session.method == Method.GET && chatFilesChatId != null -> listChatFilesResponse(session, chatFilesChatId)
             session.method == Method.POST && chatFilesChatId != null -> attachChatFileResponse(session, chatFilesChatId)
             session.method == Method.DELETE && chatFileAttachment != null -> detachChatFileResponse(
@@ -174,6 +185,31 @@ class LocalHttpServer(
     private fun chatToolLogsChatIdFromPath(path: String): String? {
         val parts = path.split('/').filter { it.isNotBlank() }
         return if (parts.size == 5 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "tools" && parts[4] == "logs") parts[2] else null
+    }
+
+    private fun chatGenerationCancelIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 5 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "generation" && parts[4] == "cancel") parts[2] else null
+    }
+
+    private fun chatGenerationRetryIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 5 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "generation" && parts[4] == "retry") parts[2] else null
+    }
+
+    private fun chatGenerationListIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 4 && parts[0] == "api" && parts[1] == "chats" && parts[3] == "generations") parts[2] else null
+    }
+
+    private fun generationCancelIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 4 && parts[0] == "api" && parts[1] == "generations" && parts[3] == "cancel") parts[2] else null
+    }
+
+    private fun generationIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 3 && parts[0] == "api" && parts[1] == "generations") parts[2] else null
     }
 
     private fun skillSlugFromPath(path: String): String? {
@@ -851,9 +887,79 @@ class LocalHttpServer(
         return jsonResponse(Response.Status.OK, JSONObject().put("logs", logs))
     }
 
+    private fun listGenerationsResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        val array = JSONArray()
+        generationJobs.recentForChat(chatId).forEach { array.put(generationJobJson(it)) }
+        return jsonResponse(Response.Status.OK, JSONObject().put("generations", array))
+    }
+
+    private fun getGenerationResponse(session: IHTTPSession, generationId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val job = generationJobs.get(generationId) ?: return notFoundResponse()
+        if (job.userId != user.id) return notFoundResponse()
+        return jsonResponse(Response.Status.OK, JSONObject().put("generation", generationJobJson(job)))
+    }
+
+    private fun cancelGenerationResponse(session: IHTTPSession, generationId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val job = generationJobs.get(generationId) ?: return notFoundResponse()
+        if (job.userId != user.id) return notFoundResponse()
+        liteRtLmManager.cancelCurrentGeneration()
+        val cancelled = generationJobs.cancel(generationId) ?: job
+        return jsonResponse(Response.Status.OK, JSONObject().put("generation", generationJobJson(cancelled)))
+    }
+
+    private fun cancelChatGenerationResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        val job = generationJobs.activeForChat(chatId) ?: return errorResponse(Response.Status.CONFLICT, "no_active_generation", "No active generation for this chat")
+        liteRtLmManager.cancelCurrentGeneration()
+        val cancelled = generationJobs.cancel(job.id) ?: job
+        return jsonResponse(Response.Status.OK, JSONObject().put("generation", generationJobJson(cancelled)))
+    }
+
+    private fun retryChatGenerationResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        if (generationJobs.activeAny() != null || liteRtLmManager.performanceSnapshot().activeGeneration) {
+            return errorResponse(Response.Status.CONFLICT, "generation_active", "Another generation is already active")
+        }
+        val messages = chatRepository.listMessages(user.id, chat.id).orEmpty()
+        val lastUser = messages.lastOrNull { it.role == "user" }
+            ?: return errorResponse(Response.Status.BAD_REQUEST, "no_user_message", "No user message is available to retry")
+        val activeState = skillRepository.getChatSkillState(chat.id)
+        val skill = skillRepository.getSkillBySlug(activeState.skillSlug)
+            ?: return errorResponse(Response.Status.BAD_REQUEST, "skill_unavailable", "Skill is unavailable")
+        val fileIds = chatRepository.listAttachedFileIds(user.id, chat.id).orEmpty()
+        val responseMode = responseModeForSkill(skill, chat.profile)
+        val promptPlan = buildAppPromptPlan(user.id, chat.id, fileIds, messages.filter { it.createdAtMs <= lastUser.createdAtMs }, lastUser, responseMode, retry = true, skill = skill, skillState = activeState)
+            ?: return notFoundResponse()
+        if (!liteRtLmManager.isLoaded()) return errorResponse(Response.Status.SERVICE_UNAVAILABLE, "model_not_loaded", "Model is not loaded")
+        val job = generationJobs.create(chat.id, user.id, lastUser.id)
+        generationJobs.markRunning(job.id, streaming = false)
+        val result = generateAppReply(user.id, chat, lastUser, promptPlan, responseMode, ConversationMode.FRESH_PER_REQUEST)
+        return result.fold(
+            onSuccess = { (usedPlan, parsed) ->
+                updateContextState(chat.id, usedPlan.context)
+                val assistant = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
+                val done = generationJobs.complete(job.id, assistant.id, parsed.finalText) ?: job
+                jsonResponse(Response.Status.OK, JSONObject().put("message", messageJson(assistant)).put("generation", generationJobJson(done)))
+            },
+            onFailure = {
+                val failed = generationJobs.fail(job.id, it) ?: job
+                jsonResponse(Response.Status.INTERNAL_ERROR, JSONObject().put("error", promptBudgetManager.friendlyError(it).second).put("generation", generationJobJson(failed)))
+            }
+        )
+    }
+
     private fun createMessageResponse(session: IHTTPSession, chatId: String): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
+        if (generationJobs.activeAny() != null || liteRtLmManager.performanceSnapshot().activeGeneration) {
+            return errorResponse(Response.Status.CONFLICT, "generation_active", "Another generation is already active")
+        }
         val requestJson = readJsonRequest(session) ?: return jsonResponse(
             Response.Status.BAD_REQUEST,
             JSONObject().put("error", "Malformed JSON or missing JSON body")
@@ -890,17 +996,21 @@ class LocalHttpServer(
         val promptPlan = buildAppPromptPlan(user.id, chat.id, fileIds, messages, userMessage, responseMode, retry = false, skill = skill, skillState = activeState)
             ?: return notFoundResponse()
         val prompt = liteRtLmManager.applyResponseModeHint(promptPlan.plan.finalPrompt, responseMode)
+        val generationJob = generationJobs.create(chat.id, user.id, userMessage.id)
         return if (requestJson.optBoolean("stream", false)) {
-            streamingAppMessageResponse(chat, userMessage, promptPlan, prompt, conversationMode, responseMode)
+            streamingAppMessageResponse(chat, userMessage, promptPlan, prompt, conversationMode, responseMode, generationJob.id)
         } else {
             if (!liteRtLmManager.isLoaded()) {
-                return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, JSONObject().put("error", "Model is not loaded"))
+                generationJobs.fail(generationJob.id, IllegalStateException("Model is not loaded"))
+                return errorResponse(Response.Status.SERVICE_UNAVAILABLE, "model_not_loaded", "Model is not loaded")
             }
+            generationJobs.markRunning(generationJob.id, streaming = false)
             val result = generateAppReply(user.id, chat, userMessage, promptPlan, responseMode, conversationMode)
             result.fold(
                 onSuccess = { (usedPlan, parsed) ->
                     updateContextState(chat.id, usedPlan.context)
                     val assistantMessage = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
+                    val completedJob = generationJobs.complete(generationJob.id, assistantMessage.id, parsed.finalText) ?: generationJob
                     jsonResponse(
                         Response.Status.OK,
                         JSONObject()
@@ -908,16 +1018,19 @@ class LocalHttpServer(
                             .put("userMessage", messageJson(userMessage))
                             .put("context", contextJson(usedPlan.plan.contextMetadata))
                             .put("skill", skillJson(usedPlan.skill, false))
+                            .put("generation", generationJobJson(completedJob))
                             .put("thinking", JSONObject().put("present", parsed.thinkingText != null).put("visible", usedPlan.skillState.showThinking))
                     )
                 },
                 onFailure = { error ->
+                    val failedJob = generationJobs.fail(generationJob.id, error) ?: generationJob
                     val friendly = promptBudgetManager.friendlyError(error)
                     jsonResponse(
                         Response.Status.INTERNAL_ERROR,
                         JSONObject()
                             .put("error", friendly.second)
                             .put("code", friendly.first)
+                            .put("generation", generationJobJson(failedJob))
                     )
                 }
             )
@@ -1538,6 +1651,7 @@ class LocalHttpServer(
         prompt: String,
         conversationMode: ConversationMode,
         responseMode: ResponseMode,
+        generationId: String,
     ): Response {
         val input = PipedInputStream(STREAM_PIPE_BUFFER_BYTES)
         val output = PipedOutputStream(input)
@@ -1553,10 +1667,13 @@ class LocalHttpServer(
 
                 try {
                     if (!liteRtLmManager.isLoaded()) {
+                        generationJobs.fail(generationId, IllegalStateException("Model is not loaded"))
                         writeEvent(JSONObject().put("error", "Model is not loaded").toString())
                         writeEvent("[DONE]")
                         return@use
                     }
+                    generationJobs.markRunning(generationId, streaming = true)
+                    writeEvent(JSONObject().put("generation", generationJobJson(generationJobs.get(generationId)!!)).toString())
                     writeEvent(JSONObject().put("context", contextJson(promptPlan.plan.contextMetadata)).toString())
                     writeEvent(JSONObject().put("skill", skillJson(promptPlan.skill, false)).toString())
                     val result = generateAppReply(
@@ -1576,11 +1693,15 @@ class LocalHttpServer(
                             }
                             if (parsed.finalText.isNotBlank()) writeEvent(JSONObject().put("content", parsed.finalText).toString())
                             val assistantMessage = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
+                            generationJobs.complete(generationId, assistantMessage.id, parsed.finalText)
                             writeEvent(JSONObject().put("message", messageJson(assistantMessage)).toString())
+                            writeEvent(JSONObject().put("generation", generationJobJson(generationJobs.get(generationId)!!)).toString())
                             writeEvent("[DONE]")
                         },
                         onFailure = { error ->
+                            generationJobs.fail(generationId, error)
                             writeEvent(appStreamingErrorJson(error).toString())
+                            writeEvent(JSONObject().put("generation", generationJobJson(generationJobs.get(generationId)!!)).toString())
                             writeEvent("[DONE]")
                         }
                     )
@@ -1751,6 +1872,21 @@ class LocalHttpServer(
             .put("requestPreview", sanitizeJsonPreview(log.requestJson))
             .put("resultPreview", log.resultJson?.let { sanitizeJsonPreview(it) } ?: JSONObject.NULL)
             .put("createdAtMs", log.createdAtMs)
+    }
+
+    private fun generationJobJson(job: GenerationJobRecord): JSONObject {
+        return JSONObject()
+            .put("id", job.id)
+            .put("chatId", job.chatId)
+            .put("userId", job.userId)
+            .put("userMessageId", job.userMessageId)
+            .put("assistantMessageId", job.assistantMessageId ?: JSONObject.NULL)
+            .put("status", job.status.name.lowercase())
+            .put("createdAtMs", job.createdAtMs)
+            .put("startedAtMs", job.startedAtMs ?: JSONObject.NULL)
+            .put("completedAtMs", job.completedAtMs ?: JSONObject.NULL)
+            .put("error", job.error ?: JSONObject.NULL)
+            .put("partialOutput", job.partialOutput)
     }
 
     private fun sanitizeJsonPreview(value: String): String {
