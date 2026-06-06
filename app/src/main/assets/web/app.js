@@ -14,6 +14,7 @@
     adminToolLogs: [],
     selectedAdminSkill: null,
     currentGenerationId: null,
+    chatFilter: "",
     streaming: false,
     contextMessage: "",
     toolStatus: "",
@@ -136,6 +137,10 @@
     $("admin-link").hidden = current.user.role !== "ADMIN";
     $("logout-button").addEventListener("click", logout);
     $("new-chat-button").addEventListener("click", createChat);
+    $("chat-search").addEventListener("input", () => {
+      state.chatFilter = $("chat-search").value.trim().toLowerCase();
+      renderChats();
+    });
     $("file-upload").addEventListener("change", uploadFile);
     $("skill-select").addEventListener("change", () => changeSkill($("skill-select").value));
     $("show-thinking-toggle").addEventListener("change", () => updateThinkingToggle($("show-thinking-toggle").checked));
@@ -149,6 +154,7 @@
       }
     });
     await loadSkills();
+    await loadModelStatus();
     await loadChats();
     if (!state.currentChatId) await createChat();
   }
@@ -256,14 +262,54 @@
   function renderChats() {
     const list = $("chat-list");
     list.innerHTML = "";
-    state.chats.forEach((chat) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `chat-item${chat.id === state.currentChatId ? " active" : ""}`;
-      button.innerHTML = `<strong>${escapeText(chat.title || "Chat")}</strong><span class="file-meta">${escapeText(chat.profile)}</span>`;
-      button.addEventListener("click", () => openChat(chat.id));
-      list.appendChild(button);
+    const chats = state.chats.filter((chat) => !state.chatFilter || `${chat.title} ${chat.profile}`.toLowerCase().includes(state.chatFilter));
+    if (!chats.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-state";
+      empty.textContent = state.chatFilter ? "No chats match this search." : "No chats yet.";
+      list.appendChild(empty);
+      return;
+    }
+    chats.forEach((chat) => {
+      const item = document.createElement("div");
+      item.className = `chat-item${chat.id === state.currentChatId ? " active" : ""}`;
+      item.innerHTML = `
+        <button type="button" class="chat-open">
+          <strong>${escapeText(chat.title || "Chat")}</strong>
+          <span class="file-meta">${escapeText(chat.profile)} - ${escapeText(formatDate(chat.updatedAtMs))}</span>
+        </button>
+        <div class="chat-actions">
+          <button type="button" data-action="rename">Rename</button>
+          <button type="button" data-action="archive">Archive</button>
+        </div>
+      `;
+      item.querySelector(".chat-open").addEventListener("click", () => openChat(chat.id));
+      item.querySelector('[data-action="rename"]').addEventListener("click", () => renameChat(chat));
+      item.querySelector('[data-action="archive"]').addEventListener("click", () => archiveChat(chat));
+      list.appendChild(item);
     });
+  }
+
+  async function renameChat(chat) {
+    const title = window.prompt("Rename chat", chat.title || "New chat");
+    if (title == null) return;
+    const result = await jsonRequest(`/api/chats/${encodeURIComponent(chat.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ title }),
+    });
+    state.chats = state.chats.map((item) => item.id === chat.id ? result.chat : item);
+    renderChats();
+  }
+
+  async function archiveChat(chat) {
+    if (!window.confirm(`Archive "${chat.title || "this chat"}"?`)) return;
+    await jsonRequest(`/api/chats/${encodeURIComponent(chat.id)}`, { method: "DELETE" });
+    if (state.currentChatId === chat.id) {
+      state.currentChatId = null;
+      state.messages = [];
+      $("messages").innerHTML = "";
+    }
+    await loadChats();
   }
 
   function renderMessages() {
@@ -278,8 +324,9 @@
     const el = document.createElement("article");
     el.className = `message ${role}`;
     el.setAttribute("aria-label", role === "user" ? "Your message" : "Assistant response");
-    el.innerHTML = `<div class="thinking-slot"></div><div class="message-content"></div>`;
+    el.innerHTML = `<div class="message-toolbar"><span>${role === "user" ? "You" : "Assistant"}</span><button type="button">Copy</button></div><div class="thinking-slot"></div><div class="message-content"></div>`;
     const contentEl = el.querySelector(".message-content");
+    el.querySelector(".message-toolbar button").addEventListener("click", () => copyText(content || contentEl.textContent || ""));
     renderThinking(el.querySelector(".thinking-slot"), role, options.thinking || "");
     setMessageContent(contentEl, role, content || "", options.final === true);
     $("messages").appendChild(el);
@@ -569,6 +616,7 @@
 
   async function uploadFile() {
     showError("files-error", "");
+    $("upload-status").textContent = "";
     const file = $("file-upload").files[0];
     if (!file) return;
     if (!file.name.toLowerCase().endsWith(".md")) {
@@ -578,6 +626,7 @@
     }
     try {
       if (!state.currentChatId) await createChat();
+      $("upload-status").textContent = `Uploading ${file.name}...`;
       const content = await file.text();
       const result = await jsonRequest("/api/files/upload", {
         method: "POST",
@@ -589,8 +638,10 @@
       });
       $("file-upload").value = "";
       await loadChatFiles();
+      $("upload-status").textContent = `Attached ${file.name}.`;
     } catch (error) {
       showError("files-error", error.message);
+      $("upload-status").textContent = "";
     } finally {
       $("file-upload").value = "";
     }
@@ -754,6 +805,18 @@
       return escapeText(trimmed);
     }
     return null;
+  }
+
+  async function loadModelStatus() {
+    const banner = $("model-status-banner");
+    try {
+      const health = await jsonRequest("/health");
+      banner.textContent = `${health.modelLoaded ? "Model loaded" : "Model not loaded"} - ${health.securityMode || health.serverMode || "local"}${health.storageWritable === false ? " - storage warning" : ""}`;
+      banner.className = `status-banner ${health.modelLoaded ? "ok" : "warn"}`;
+    } catch (_) {
+      banner.textContent = "Server status unavailable.";
+      banner.className = "status-banner warn";
+    }
   }
 
   function renderAdminStatus(status) {

@@ -160,6 +160,33 @@ textarea {
   text-align: left;
 }
 
+.chat-open {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+  text-align: left;
+}
+
+.chat-open:hover {
+  background: transparent;
+}
+
+.chat-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.chat-actions button {
+  border: 1px solid var(--border);
+  background: #ffffff;
+  color: var(--accent-strong);
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
 .chat-item.active {
   border-color: var(--accent);
 }
@@ -213,6 +240,23 @@ textarea {
   border-radius: 8px;
   padding: 12px 14px;
   overflow-wrap: anywhere;
+}
+
+.message-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.message-toolbar button {
+  border: 1px solid var(--border);
+  background: #ffffff;
+  color: var(--accent-strong);
+  padding: 4px 8px;
+  font-size: 12px;
 }
 
 .message-content {
@@ -341,6 +385,29 @@ textarea {
   margin: 0 0 8px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.status-banner {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+.status-banner.ok {
+  background: #eef8f4;
+  color: #116149;
+}
+
+.status-banner.warn {
+  background: #fff8e6;
+  color: #7a4f00;
+}
+
+.shortcut-hint,
+.empty-state {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .composer {

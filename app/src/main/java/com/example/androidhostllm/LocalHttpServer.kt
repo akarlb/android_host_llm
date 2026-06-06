@@ -128,6 +128,7 @@ class LocalHttpServer(
             session.method == Method.GET && fileId != null -> getFileResponse(session, fileId)
             session.method == Method.DELETE && fileId != null -> deleteFileResponse(session, fileId)
             session.method == Method.GET && chatId != null -> getChatResponse(session, chatId)
+            session.method == Method.PUT && chatId != null -> renameChatResponse(session, chatId)
             session.method == Method.POST && messageChatId != null -> createMessageResponse(session, messageChatId)
             session.method == Method.DELETE && chatId != null -> deleteChatResponse(session, chatId)
             session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse(session)
@@ -700,6 +701,15 @@ class LocalHttpServer(
                 .put("messages", messages)
                 .put("files", chatFilesJson(user.id, chatId))
         )
+    }
+
+    private fun renameChatResponse(session: IHTTPSession, chatId: String): Response {
+        val user = requireAppUser(session) ?: return unauthorizedResponse()
+        val requestJson = readJsonRequest(session) ?: return errorResponse(Response.Status.BAD_REQUEST, "bad_json", "Malformed JSON")
+        val title = requestJson.optString("title").trim()
+        val chat = chatRepository.renameChat(user.id, chatId, title)
+            ?: return errorResponse(Response.Status.BAD_REQUEST, "invalid_title", "Chat title is required")
+        return jsonResponse(Response.Status.OK, JSONObject().put("chat", chatJson(chat)))
     }
 
     private fun listChatFilesResponse(session: IHTTPSession, chatId: String): Response {

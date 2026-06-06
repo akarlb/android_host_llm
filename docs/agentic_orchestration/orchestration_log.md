@@ -428,3 +428,43 @@ Results:
 
 Next action:
 - Commit this state update and create `codex/orchestration/phase4-mainstream-frontend-parity`.
+
+## 2026-06-06T18:35:31+02:00
+
+Branch: codex/orchestration/phase4-mainstream-frontend-parity
+
+Phase: Phase 4
+
+Action taken:
+- Added chat rename backend route.
+- Added chat search/filter, rename/archive controls, empty states, message copy action, upload status, model status banner, and composer hint.
+- Added Phase 4 manual browser/mobile checklist and handoff docs.
+- Ran syntax checks, Gradle test, lint, check, and APK compile gate.
+
+Files changed:
+- app/src/main/java/com/example/androidhostllm/ChatRepository.kt
+- app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt
+- app/src/main/assets/web/chat.html
+- app/src/main/assets/web/app.js
+- app/src/main/assets/web/styles.css
+- docs/testing/phase4_frontend_manual_test_checklist.md
+- docs/audits/current/phase4_preimplementation_audit.md
+- docs/audits/current/phase4_mainstream_frontend_parity_handoff.md
+- docs/audits/current/phase4_completion_audit.md
+
+Checks run:
+- git diff --check
+- bash -n test_web_ui_smoke.sh
+- bash -n test_chat_api.sh
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew lint
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew check
+
+Results:
+- All listed checks passed.
+- APK compile passed.
+- Live browser/mobile validation skipped; manual checklist added.
+
+Next action:
+- Commit Phase 4, run final branch checks, and merge into `codex/orchestration-phases-1-7`.
