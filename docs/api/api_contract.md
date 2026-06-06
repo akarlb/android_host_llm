@@ -219,6 +219,36 @@ Non-streaming success:
 
 Errors: `400`, `401`, `404`, `503` if model is not loaded, `500` generation failure.
 
+### `GET /api/chats/{chatId}/generations`
+
+Auth: authenticated chat owner.
+
+Returns recent generation jobs for the chat.
+
+### `POST /api/chats/{chatId}/generation/cancel`
+
+Auth: authenticated chat owner.
+
+Cancels the active generation for a chat, if one exists.
+
+### `POST /api/chats/{chatId}/generation/retry`
+
+Auth: authenticated chat owner.
+
+Regenerates from the most recent user message and appends a new assistant message.
+
+### `GET /api/generations/{generationId}`
+
+Auth: owner of the generation job.
+
+Returns generation status, timestamps, error, and partial/final output.
+
+### `POST /api/generations/{generationId}/cancel`
+
+Auth: owner of the generation job.
+
+Cancels the generation and returns its updated job record.
+
 ## File Routes
 
 Auth: authenticated. Files are per-user.

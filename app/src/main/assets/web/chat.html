@@ -45,7 +45,11 @@
             <input id="file-upload" type="file" accept=".md,text/markdown,text/plain">
           </label>
           <textarea id="message-input" rows="3" placeholder="Ask the local model..." required></textarea>
-          <button id="send-button" type="submit">Send</button>
+          <div class="send-actions">
+            <button id="send-button" type="submit">Send</button>
+            <button id="stop-button" type="button" hidden>Stop</button>
+            <button id="retry-button" type="button">Retry</button>
+          </div>
         </div>
         <p id="files-error" class="error" role="alert"></p>
         <p id="chat-error" class="error" role="alert"></p>
