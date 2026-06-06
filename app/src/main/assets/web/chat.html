@@ -20,9 +20,12 @@
     </header>
     <aside class="sidebar">
       <button id="new-chat-button" type="button">New chat</button>
+      <label class="sr-only" for="chat-search">Search chats</label>
+      <input id="chat-search" type="search" placeholder="Search chats">
       <div id="chat-list" class="chat-list"></div>
     </aside>
     <main class="chat-main">
+      <section id="model-status-banner" class="status-banner" aria-live="polite">Checking local model...</section>
       <section class="chat-controls" aria-label="Chat controls">
         <label>Skill:
           <select id="skill-select"></select>
@@ -38,6 +41,8 @@
       <form id="message-form" class="composer">
         <div id="selected-files" class="selected-files"></div>
         <p id="context-status" class="context-status" aria-live="polite"></p>
+        <p id="upload-status" class="context-status" aria-live="polite"></p>
+        <p class="shortcut-hint">Enter sends. Shift+Enter adds a new line.</p>
         <div class="composer-row">
           <label class="attach-button" title="Attach Markdown file">
             <span aria-hidden="true">+</span>

@@ -133,6 +133,22 @@ class ChatRepository(context: Context) {
     }
 
     @Synchronized
+    fun renameChat(userId: String, chatId: String, title: String): ChatRecord? {
+        val cleanTitle = title.trim().takeIf { it.isNotBlank() }?.take(120) ?: return null
+        val now = System.currentTimeMillis()
+        val updated = database.writableDatabase.update(
+            "chats",
+            ContentValues().apply {
+                put("title", cleanTitle)
+                put("updated_at_ms", now)
+            },
+            "id = ? AND user_id = ? AND archived = 0",
+            arrayOf(chatId, userId)
+        ) > 0
+        return if (updated) getChat(userId, chatId) else null
+    }
+
+    @Synchronized
     fun touchChat(chatId: String, updatedAtMs: Long = System.currentTimeMillis()) {
         database.writableDatabase.update(
             "chats",
