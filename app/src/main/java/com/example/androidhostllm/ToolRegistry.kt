@@ -18,7 +18,14 @@ data class ToolDefinition(
 )
 
 data class ParsedToolCall(val name: String, val arguments: JSONObject, val raw: JSONObject)
-data class ToolExecutionResult(val status: ToolCallStatus, val result: JSONObject?, val error: String?)
+data class ToolCallParseResult(
+    val call: ParsedToolCall?,
+    val status: ToolCallStatus,
+    val errorCode: String?,
+    val errorMessage: String?,
+    val repairable: Boolean,
+)
+data class ToolExecutionResult(val status: ToolCallStatus, val result: JSONObject?, val errorCode: String?, val error: String?)
 
 class ToolRegistry(
     private val chatRepository: ChatRepository,
@@ -27,8 +34,8 @@ class ToolRegistry(
     private val tools = listOf(
         ToolDefinition("get_current_datetime", "Get current date/time", "Returns the device current date and time.", objectSchema(), objectSchema(), allowedForSkills = listOf("default")),
         ToolDefinition("list_chat_files", "List chat files", "Lists Markdown files attached to the current chat.", objectSchema(), objectSchema(), allowedForSkills = listOf("default", "coding", "markdown-qa")),
-        ToolDefinition("count_markdown_chunks", "Count Markdown chunks", "Returns chunk and character counts for an attached Markdown file.", objectSchema(required = listOf("fileId"), properties = mapOf("fileId" to JSONObject().put("type", "string"))), objectSchema(), allowedForSkills = listOf("markdown-qa")),
-        ToolDefinition("search_attached_markdown", "Search attached Markdown", "Searches attached Markdown chunks with simple keyword overlap.", objectSchema(properties = mapOf("query" to JSONObject().put("type", "string"), "limit" to JSONObject().put("type", "integer"))), objectSchema(), allowedForSkills = listOf("default", "coding", "markdown-qa")),
+        ToolDefinition("count_markdown_chunks", "Count Markdown chunks", "Returns chunk and character counts for an attached Markdown file.", objectSchema(required = listOf("fileId"), properties = mapOf("fileId" to JSONObject().put("type", "string").put("maxLength", 120))), objectSchema(), allowedForSkills = listOf("markdown-qa")),
+        ToolDefinition("search_attached_markdown", "Search attached Markdown", "Searches attached Markdown chunks with simple keyword overlap.", objectSchema(properties = mapOf("query" to JSONObject().put("type", "string").put("maxLength", 500), "limit" to JSONObject().put("type", "integer").put("minimum", 1).put("maximum", 10))), objectSchema(), allowedForSkills = listOf("default", "coding", "markdown-qa")),
     )
     private val byName = tools.associateBy { it.name }
 
@@ -51,24 +58,45 @@ class ToolRegistry(
         }.trim()
     }
 
-    fun parseToolCall(text: String): ParsedToolCall? {
+    fun parseToolCall(text: String): ParsedToolCall? = parseToolCallDetailed(text).call
+
+    fun parseToolCallDetailed(text: String): ToolCallParseResult {
         val trimmed = text.trim()
-        if (trimmed.length > MAX_TOOL_CALL_CHARS) return null
-        val json = runCatching { JSONObject(trimmed) }.getOrNull() ?: return null
-        if (json.length() != 1 || !json.has("tool_call")) return null
-        val call = json.optJSONObject("tool_call") ?: return null
+        if (trimmed.isBlank()) return parseFailure("empty_tool_call", "Tool call is empty", repairable = true)
+        if (trimmed.length > MAX_TOOL_CALL_CHARS) return parseFailure("tool_call_too_large", "Tool call payload is too large", repairable = false)
+        val json = candidateJsonObjects(trimmed).let { candidates ->
+            when (candidates.size) {
+                0 -> return parseFailure("tool_call_not_json", "No single JSON object found", repairable = looksLikeToolCall(trimmed))
+                1 -> candidates.single()
+                else -> return parseFailure("multiple_tool_calls", "Multiple JSON objects found", repairable = false)
+            }
+        }
+        if (json.length() != 1 || !json.has("tool_call")) return parseFailure("invalid_tool_call_root", "Expected only a tool_call object", repairable = true)
+        val call = json.optJSONObject("tool_call") ?: return parseFailure("invalid_tool_call_shape", "tool_call must be an object", repairable = true)
+        val allowedCallFields = setOf("name", "arguments")
+        call.keys().forEach { if (it !in allowedCallFields) return parseFailure("unexpected_tool_call_field", "Unexpected tool_call field: $it", repairable = false) }
         val name = call.optString("name").trim()
-        if (name.isBlank()) return null
-        val args = call.optJSONObject("arguments") ?: JSONObject()
-        return ParsedToolCall(name, args, json)
+        if (name.isBlank()) return parseFailure("missing_tool_name", "Tool name is required", repairable = true)
+        val tool = byName[name] ?: return ToolCallParseResult(null, ToolCallStatus.UNKNOWN_TOOL, "unknown_tool", "Unknown tool: $name", repairable = false)
+        val args = if (call.has("arguments")) {
+            call.optJSONObject("arguments") ?: return parseFailure("invalid_arguments_shape", "Tool arguments must be an object", repairable = true)
+        } else {
+            JSONObject()
+        }
+        val validation = validateArguments(tool, args)
+        if (!validation.valid) return ToolCallParseResult(null, ToolCallStatus.INVALID_ARGUMENTS, "invalid_arguments", validation.error ?: "Tool arguments are invalid", repairable = true)
+        return ToolCallParseResult(ParsedToolCall(name, args, json), ToolCallStatus.SUCCESS, null, null, repairable = false)
     }
 
     fun execute(userId: String, chatId: String, skill: SkillRecord, call: ParsedToolCall): ToolExecutionResult {
-        val tool = byName[call.name] ?: return ToolExecutionResult(ToolCallStatus.REJECTED, null, "Tool is unavailable")
+        val tool = byName[call.name] ?: return ToolExecutionResult(ToolCallStatus.UNKNOWN_TOOL, null, "unknown_tool", "Tool is unavailable")
+        if (chatRepository.getChat(userId, chatId) == null) return ToolExecutionResult(ToolCallStatus.PERMISSION_DENIED, null, "chat_not_owned", "Chat is unavailable")
         if (!tool.enabled || call.name !in skill.allowedTools || (tool.allowedForSkills.isNotEmpty() && skill.slug !in tool.allowedForSkills)) {
-            return ToolExecutionResult(ToolCallStatus.REJECTED, null, "Tool is not allowed for this skill")
+            return ToolExecutionResult(ToolCallStatus.PERMISSION_DENIED, null, "tool_not_allowed", "Tool is not allowed for this skill")
         }
-        if (!validateArguments(tool, call.arguments)) return ToolExecutionResult(ToolCallStatus.REJECTED, null, "Tool arguments are invalid")
+        if (tool.dangerLevel != "SAFE") return ToolExecutionResult(ToolCallStatus.PERMISSION_DENIED, null, "danger_level_denied", "Tool danger level is not allowed")
+        val validation = validateArguments(tool, call.arguments)
+        if (!validation.valid) return ToolExecutionResult(ToolCallStatus.INVALID_ARGUMENTS, null, "invalid_arguments", validation.error ?: "Tool arguments are invalid")
         return runCatching {
             when (call.name) {
                 "get_current_datetime" -> currentDateTime()
@@ -78,20 +106,14 @@ class ToolRegistry(
                 else -> throw IllegalArgumentException("Tool is unavailable")
             }
         }.fold(
-            onSuccess = { ToolExecutionResult(ToolCallStatus.SUCCESS, it, null) },
-            onFailure = { ToolExecutionResult(ToolCallStatus.FAILED, null, "Tool execution failed") },
+            onSuccess = { ToolExecutionResult(ToolCallStatus.SUCCESS, it, null, null) },
+            onFailure = { ToolExecutionResult(ToolCallStatus.EXECUTION_FAILED, null, "execution_failed", "Tool execution failed") },
         )
     }
 
-    private fun validateArguments(tool: ToolDefinition, args: JSONObject): Boolean {
-        if (args.toString().length > MAX_ARGUMENT_CHARS) return false
-        val props = tool.inputSchema.optJSONObject("properties") ?: JSONObject()
-        val allowed = mutableSetOf<String>()
-        props.keys().forEach { allowed += it }
-        args.keys().forEach { if (it !in allowed) return false }
-        val required = tool.inputSchema.optJSONArray("required") ?: JSONArray()
-        for (i in 0 until required.length()) if (!args.has(required.getString(i))) return false
-        return true
+    private fun validateArguments(tool: ToolDefinition, args: JSONObject): ValidationResult {
+        if (args.toString().length > MAX_ARGUMENT_CHARS) return ValidationResult.fail("Arguments payload is too large")
+        return JsonSchemaValidator.validateObject(tool.inputSchema, args)
     }
 
     private fun currentDateTime(): JSONObject {
@@ -152,6 +174,61 @@ class ToolRegistry(
         private fun objectSchema(required: List<String> = emptyList(), properties: Map<String, JSONObject> = emptyMap()): JSONObject {
             val props = JSONObject(); properties.forEach { (key, value) -> props.put(key, value) }
             return JSONObject().put("type", "object").put("required", JSONArray(required)).put("properties", props)
+        }
+
+        private fun parseFailure(code: String, message: String, repairable: Boolean): ToolCallParseResult {
+            return ToolCallParseResult(null, ToolCallStatus.PARSE_FAILED, code, message, repairable)
+        }
+
+        private fun candidateJsonObjects(text: String): List<JSONObject> {
+            val exact = runCatching { JSONObject(text) }.getOrNull()
+            if (exact != null) return listOf(exact)
+            val fenced = Regex("(?s)```(?:json)?\\s*(\\{.*?})\\s*```").findAll(text).mapNotNull { match ->
+                runCatching { JSONObject(match.groupValues[1].trim()) }.getOrNull()
+            }.toList()
+            if (fenced.isNotEmpty()) return fenced
+            return extractTopLevelJsonObjectStrings(text).mapNotNull { candidate ->
+                runCatching { JSONObject(candidate) }.getOrNull()
+            }
+        }
+
+        private fun extractTopLevelJsonObjectStrings(text: String): List<String> {
+            val ranges = mutableListOf<IntRange>()
+            var depth = 0
+            var start = -1
+            var inString = false
+            var escaped = false
+            text.forEachIndexed { index, char ->
+                if (escaped) {
+                    escaped = false
+                    return@forEachIndexed
+                }
+                if (char == '\\' && inString) {
+                    escaped = true
+                    return@forEachIndexed
+                }
+                if (char == '"') inString = !inString
+                if (inString) return@forEachIndexed
+                when (char) {
+                    '{' -> {
+                        if (depth == 0) start = index
+                        depth += 1
+                    }
+                    '}' -> {
+                        if (depth > 0) depth -= 1
+                        if (depth == 0 && start >= 0) {
+                            ranges += start..index
+                            start = -1
+                        }
+                    }
+                }
+            }
+            return ranges.map { text.substring(it) }
+        }
+
+        private fun looksLikeToolCall(text: String): Boolean {
+            val lower = text.lowercase(Locale.US)
+            return "tool_call" in lower || "\"name\"" in lower && "\"arguments\"" in lower || "```json" in lower
         }
     }
 }

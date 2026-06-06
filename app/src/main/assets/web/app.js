@@ -1027,8 +1027,22 @@
       const item = document.createElement("details");
       item.className = "recent-file";
       item.innerHTML = `
-        <summary><strong>${escapeText(log.toolName)}</strong> <span class="file-meta">${escapeText(log.status)} - ${escapeText(formatDate(log.createdAtMs))}</span></summary>
-        <pre>${escapeText(JSON.stringify({ chatId: log.chatId, messageId: log.messageId, errorMessage: log.errorMessage, requestPreview: log.requestPreview, resultPreview: log.resultPreview }, null, 2))}</pre>
+        <summary><strong>${escapeText(log.toolName)}</strong> <span class="file-meta">${escapeText(log.status)} - ${escapeText(log.skillSlug || "unknown skill")} - ${escapeText(formatDate(log.createdAtMs))}</span></summary>
+        <pre>${escapeText(JSON.stringify({
+          requestId: log.requestId,
+          chatId: log.chatId,
+          messageId: log.messageId,
+          skillSlug: log.skillSlug,
+          skillVersion: log.skillVersion,
+          parsedToolName: log.parsedToolName,
+          status: log.status,
+          durationMs: log.durationMs,
+          errorCode: log.errorCode,
+          errorMessage: log.errorMessage,
+          argumentsPreview: log.argumentsPreview,
+          requestPreview: log.requestPreview,
+          resultPreview: log.resultPreview,
+        }, null, 2))}</pre>
       `;
       holder.appendChild(item);
     });

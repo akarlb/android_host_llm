@@ -30,15 +30,34 @@ data class ChatSkillStateRecord(
 
 data class ToolCallLogRecord(
     val id: String,
+    val requestId: String?,
     val chatId: String,
     val messageId: String?,
     val toolName: String,
     val requestJson: String,
     val resultJson: String?,
     val status: ToolCallStatus,
+    val skillSlug: String?,
+    val skillVersion: Long?,
+    val rawModelOutput: String?,
+    val parsedToolName: String?,
+    val sanitizedArgsJson: String?,
+    val sanitizedResultPreview: String?,
+    val durationMs: Long?,
+    val errorCode: String?,
     val errorMessage: String?,
     val createdAtMs: Long,
 )
 
 enum class ToolUseMode { NONE, OPTIONAL, REQUIRED }
-enum class ToolCallStatus { PENDING, SUCCESS, FAILED, REJECTED }
+enum class ToolCallStatus {
+    PARSE_FAILED,
+    REPAIR_FAILED,
+    UNKNOWN_TOOL,
+    PERMISSION_DENIED,
+    INVALID_ARGUMENTS,
+    EXECUTION_FAILED,
+    TIMEOUT,
+    SUCCESS,
+    REJECTED,
+}

@@ -642,7 +642,7 @@ class LocalHttpServer(
                     JSONObject()
                         .put("status", "ok")
                         .put("skill", skillJson(skill, includePrompt = false))
-                        .put("response", parseAndValidateResponse(skill, it, prompt).finalText)
+                        .put("response", parseAndValidateResponse(skill, it, prompt, responseMode, ConversationMode.FRESH_PER_REQUEST).finalText)
                 )
             },
             onFailure = {
@@ -1535,11 +1535,37 @@ class LocalHttpServer(
             }
         }
         val firstText = result.getOrElse { return Result.failure(it) }
-        val toolCall = toolRegistry.parseToolCall(firstText)
+        var parseResult = toolRegistry.parseToolCallDetailed(firstText)
+        if (parseResult.call == null && usedPlan.skill.toolUseMode != ToolUseMode.NONE && parseResult.repairable) {
+            val repaired = runBlocking {
+                liteRtLmManager.generate(
+                    prompt = toolRepairPrompt(usedPlan.skill, firstText),
+                    conversationModeOverride = conversationMode,
+                    responseModeOverride = responseMode,
+                )
+            }.getOrNull()
+            parseResult = if (repaired != null) toolRegistry.parseToolCallDetailed(repaired) else parseResult.copy(status = ToolCallStatus.REPAIR_FAILED, errorCode = "repair_generation_failed", errorMessage = "Tool-call repair generation failed")
+            if (parseResult.call == null) {
+                logToolTrace(chat, userMessage, usedPlan.skill, firstText, null, null, ToolCallStatus.REPAIR_FAILED, parseResult.errorCode ?: "repair_failed", parseResult.errorMessage ?: "Tool-call repair failed")
+                if (usedPlan.skill.toolUseMode == ToolUseMode.REQUIRED) {
+                    return Result.success(usedPlan to ParsedModelResponse(firstText, null, "The model did not return a valid tool call after one repair attempt."))
+                }
+            }
+        }
+        if (parseResult.call == null && usedPlan.skill.toolUseMode == ToolUseMode.REQUIRED) {
+            logToolTrace(chat, userMessage, usedPlan.skill, firstText, null, null, parseResult.status, parseResult.errorCode ?: "tool_call_required", parseResult.errorMessage ?: "A tool call is required for this skill")
+            return Result.success(usedPlan to ParsedModelResponse(firstText, null, "The model did not return a valid tool call for this skill."))
+        }
+        if (parseResult.call == null && parseResult.status in setOf(ToolCallStatus.UNKNOWN_TOOL, ToolCallStatus.INVALID_ARGUMENTS)) {
+            logToolTrace(chat, userMessage, usedPlan.skill, firstText, null, null, parseResult.status, parseResult.errorCode, parseResult.errorMessage)
+        }
+        val toolCall = parseResult.call
         if (toolCall != null && usedPlan.skill.toolUseMode != ToolUseMode.NONE) {
             onToolEvent?.invoke(JSONObject().put("toolCall", JSONObject().put("name", toolCall.name).put("status", "started")))
+            val startedAt = System.currentTimeMillis()
             val toolResult = toolRegistry.execute(userId, chat.id, usedPlan.skill, toolCall)
-            skillRepository.insertToolLog(chat.id, userMessage.id, toolCall.name, toolCall.raw, toolResult.result, toolResult.status, toolResult.error)
+            val durationMs = System.currentTimeMillis() - startedAt
+            logToolTrace(chat, userMessage, usedPlan.skill, firstText, toolCall, toolResult, toolResult.status, toolResult.errorCode, toolResult.error, durationMs)
             onToolEvent?.invoke(JSONObject().put("toolCall", JSONObject().put("name", toolCall.name).put("status", toolResult.status.name.lowercase())))
             val toolBlock = if (toolResult.status == ToolCallStatus.SUCCESS) {
                 "Tool result for ${toolCall.name}: ${toolResult.result}"
@@ -1556,17 +1582,35 @@ class LocalHttpServer(
                     responseModeOverride = responseMode,
                 )
             }.getOrElse { return Result.failure(it) }
-            return Result.success(usedPlan to parseAndValidateResponse(usedPlan.skill, follow, userMessage.content))
+            return Result.success(usedPlan to parseAndValidateResponse(usedPlan.skill, follow, userMessage.content, responseMode, conversationMode))
         }
-        return Result.success(usedPlan to parseAndValidateResponse(usedPlan.skill, firstText, userMessage.content))
+        return Result.success(usedPlan to parseAndValidateResponse(usedPlan.skill, firstText, userMessage.content, responseMode, conversationMode))
     }
 
-    private fun parseAndValidateResponse(skill: SkillRecord, raw: String, userContent: String): ParsedModelResponse {
+    private fun parseAndValidateResponse(
+        skill: SkillRecord,
+        raw: String,
+        userContent: String,
+        responseMode: ResponseMode,
+        conversationMode: ConversationMode,
+    ): ParsedModelResponse {
         var parsed = parseThinking(raw)
         if (skill.strictOutput) {
-            val minified = minifiedJsonObject(parsed.finalText) ?: minifiedJsonObject(parsed.rawModelText)
+            val minified = strictJsonObject(skill, parsed.finalText) ?: strictJsonObject(skill, parsed.rawModelText)
             parsed = if (minified != null) {
                 parsed.copy(finalText = minified)
+            } else if (skill.outputSchemaJson != null) {
+                val repaired = runBlocking {
+                    liteRtLmManager.generate(
+                        prompt = strictOutputRepairPrompt(skill, parsed.finalText),
+                        conversationModeOverride = conversationMode,
+                        responseModeOverride = responseMode,
+                    )
+                }.getOrNull()
+                val repairedJson = repaired?.let { strictJsonObject(skill, it) }
+                if (repairedJson != null) parsed.copy(finalText = repairedJson, rawModelText = parsed.rawModelText + "\n\n[Strict output repair]\n" + repaired)
+                else if (skill.slug == "gdpr-pii-audit") parsed.copy(finalText = gdprFallbackJson(userContent))
+                else parsed.copy(finalText = "The model did not return valid JSON matching the skill output schema after one repair attempt.")
             } else if (skill.slug == "gdpr-pii-audit") {
                 parsed.copy(finalText = gdprFallbackJson(userContent))
             } else {
@@ -1574,6 +1618,66 @@ class LocalHttpServer(
             }
         }
         return parsed
+    }
+
+    private fun logToolTrace(
+        chat: ChatRecord,
+        userMessage: MessageRecord,
+        skill: SkillRecord,
+        rawModelOutput: String,
+        toolCall: ParsedToolCall?,
+        toolResult: ToolExecutionResult?,
+        status: ToolCallStatus,
+        errorCode: String?,
+        errorMessage: String?,
+        durationMs: Long? = null,
+    ) {
+        val request = toolCall?.raw ?: JSONObject().put("rawPreview", rawModelOutput.take(600))
+        val result = toolResult?.result
+        val argsJson = toolCall?.arguments?.toString()?.let { sanitizeJsonPreview(it) }
+        val resultPreview = result?.toString()?.let { sanitizeJsonPreview(it) }
+        skillRepository.insertToolLog(
+            chatId = chat.id,
+            messageId = userMessage.id,
+            toolName = toolCall?.name ?: "unparsed",
+            requestJson = request,
+            resultJson = result,
+            status = status,
+            requestId = requestId.get(),
+            skillSlug = skill.slug,
+            skillVersion = skill.updatedAtMs,
+            rawModelOutput = rawModelOutput,
+            parsedToolName = toolCall?.name,
+            sanitizedArgsJson = argsJson,
+            sanitizedResultPreview = resultPreview,
+            durationMs = durationMs,
+            errorCode = errorCode,
+            error = errorMessage,
+        )
+    }
+
+    private fun toolRepairPrompt(skill: SkillRecord, raw: String): String {
+        return buildString {
+            appendLine("The previous assistant output almost requested a tool but was not valid tool-call JSON.")
+            appendLine("Return exactly one JSON object and nothing else:")
+            appendLine("{\"tool_call\":{\"name\":\"tool_name\",\"arguments\":{}}}")
+            appendLine()
+            appendLine(toolRegistry.toolInstructions(skill))
+            appendLine()
+            appendLine("Previous output:")
+            appendLine(raw.take(2_000))
+        }
+    }
+
+    private fun strictOutputRepairPrompt(skill: SkillRecord, raw: String): String {
+        return buildString {
+            appendLine("Return only one minified JSON object that matches this output schema.")
+            appendLine(skill.outputSchemaJson ?: "{}")
+            appendLine("Do not include Markdown fences, prose, or extra fields.")
+            appendLine()
+            appendLine("Previous output:")
+            appendLine(raw.take(2_000))
+        }
     }
 
     private fun gdprFallbackJson(text: String): String {
@@ -1592,6 +1696,14 @@ class LocalHttpServer(
     private fun minifiedJsonObject(text: String): String? {
         val cleaned = text.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
         val json = runCatching { JSONObject(cleaned) }.getOrNull() ?: return null
+        return json.toString()
+    }
+
+    private fun strictJsonObject(skill: SkillRecord, text: String): String? {
+        val cleaned = minifiedJsonObject(text) ?: return null
+        val json = runCatching { JSONObject(cleaned) }.getOrNull() ?: return null
+        val schema = skill.outputSchemaJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+        if (schema != null && !JsonSchemaValidator.validateObject(schema, json).valid) return null
         return json.toString()
     }
 
@@ -1874,13 +1986,20 @@ class LocalHttpServer(
     private fun toolLogJson(log: ToolCallLogRecord): JSONObject {
         return JSONObject()
             .put("id", log.id)
+            .put("requestId", log.requestId ?: JSONObject.NULL)
             .put("chatId", log.chatId)
             .put("messageId", log.messageId ?: JSONObject.NULL)
             .put("toolName", log.toolName)
+            .put("parsedToolName", log.parsedToolName ?: JSONObject.NULL)
             .put("status", log.status.name)
+            .put("skillSlug", log.skillSlug ?: JSONObject.NULL)
+            .put("skillVersion", log.skillVersion ?: JSONObject.NULL)
+            .put("durationMs", log.durationMs ?: JSONObject.NULL)
+            .put("errorCode", log.errorCode ?: JSONObject.NULL)
             .put("errorMessage", log.errorMessage ?: JSONObject.NULL)
-            .put("requestPreview", sanitizeJsonPreview(log.requestJson))
-            .put("resultPreview", log.resultJson?.let { sanitizeJsonPreview(it) } ?: JSONObject.NULL)
+            .put("requestPreview", log.rawModelOutput?.let { sanitizeJsonPreview(it) } ?: sanitizeJsonPreview(log.requestJson))
+            .put("argumentsPreview", log.sanitizedArgsJson ?: JSONObject.NULL)
+            .put("resultPreview", log.sanitizedResultPreview ?: log.resultJson?.let { sanitizeJsonPreview(it) } ?: JSONObject.NULL)
             .put("createdAtMs", log.createdAtMs)
     }
 

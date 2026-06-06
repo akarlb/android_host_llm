@@ -164,11 +164,50 @@ class SkillRepository(context: Context) {
     }
 
     @Synchronized
-    fun insertToolLog(chatId: String, messageId: String?, toolName: String, requestJson: JSONObject, resultJson: JSONObject?, status: ToolCallStatus, error: String? = null): ToolCallLogRecord {
-        val log = ToolCallLogRecord(UUID.randomUUID().toString(), chatId, messageId, toolName, requestJson.toString(), resultJson?.toString(), status, error, System.currentTimeMillis())
+    fun insertToolLog(
+        chatId: String,
+        messageId: String?,
+        toolName: String,
+        requestJson: JSONObject,
+        resultJson: JSONObject?,
+        status: ToolCallStatus,
+        requestId: String? = null,
+        skillSlug: String? = null,
+        skillVersion: Long? = null,
+        rawModelOutput: String? = null,
+        parsedToolName: String? = null,
+        sanitizedArgsJson: String? = null,
+        sanitizedResultPreview: String? = null,
+        durationMs: Long? = null,
+        errorCode: String? = null,
+        error: String? = null,
+    ): ToolCallLogRecord {
+        val log = ToolCallLogRecord(
+            id = UUID.randomUUID().toString(),
+            requestId = requestId,
+            chatId = chatId,
+            messageId = messageId,
+            toolName = toolName,
+            requestJson = requestJson.toString(),
+            resultJson = resultJson?.toString(),
+            status = status,
+            skillSlug = skillSlug,
+            skillVersion = skillVersion,
+            rawModelOutput = rawModelOutput?.take(MAX_RAW_MODEL_OUTPUT_CHARS),
+            parsedToolName = parsedToolName,
+            sanitizedArgsJson = sanitizedArgsJson,
+            sanitizedResultPreview = sanitizedResultPreview,
+            durationMs = durationMs,
+            errorCode = errorCode,
+            errorMessage = error,
+            createdAtMs = System.currentTimeMillis(),
+        )
         database.writableDatabase.insertOrThrow("tool_call_log", null, ContentValues().apply {
-            put("id", log.id); put("chat_id", log.chatId); put("message_id", log.messageId); put("tool_name", log.toolName)
-            put("request_json", log.requestJson); put("result_json", log.resultJson); put("status", log.status.name); put("error_message", log.errorMessage); put("created_at_ms", log.createdAtMs)
+            put("id", log.id); put("request_id", log.requestId); put("chat_id", log.chatId); put("message_id", log.messageId); put("tool_name", log.toolName)
+            put("request_json", log.requestJson); put("result_json", log.resultJson); put("status", log.status.name)
+            put("skill_slug", log.skillSlug); put("skill_version", log.skillVersion); put("raw_model_output", log.rawModelOutput); put("parsed_tool_name", log.parsedToolName)
+            put("sanitized_args_json", log.sanitizedArgsJson); put("sanitized_result_preview", log.sanitizedResultPreview); put("duration_ms", log.durationMs); put("error_code", log.errorCode)
+            put("error_message", log.errorMessage); put("created_at_ms", log.createdAtMs)
         })
         return log
     }
@@ -176,14 +215,19 @@ class SkillRepository(context: Context) {
     @Synchronized
     fun listToolLogs(chatId: String): List<ToolCallLogRecord> {
         database.readableDatabase.rawQuery(
-            "SELECT id, chat_id, message_id, tool_name, request_json, result_json, status, error_message, created_at_ms FROM tool_call_log WHERE chat_id = ? ORDER BY created_at_ms DESC LIMIT 100",
+            """
+            SELECT id, request_id, chat_id, message_id, tool_name, request_json, result_json, status,
+                   skill_slug, skill_version, raw_model_output, parsed_tool_name, sanitized_args_json,
+                   sanitized_result_preview, duration_ms, error_code, error_message, created_at_ms
+            FROM tool_call_log
+            WHERE chat_id = ?
+            ORDER BY created_at_ms DESC
+            LIMIT 100
+            """.trimIndent(),
             arrayOf(chatId)
         ).use { cursor ->
             val logs = mutableListOf<ToolCallLogRecord>()
-            while (cursor.moveToNext()) logs += ToolCallLogRecord(
-                cursor.getString(0), cursor.getString(1), if (cursor.isNull(2)) null else cursor.getString(2), cursor.getString(3), cursor.getString(4), if (cursor.isNull(5)) null else cursor.getString(5),
-                runCatching { ToolCallStatus.valueOf(cursor.getString(6)) }.getOrDefault(ToolCallStatus.FAILED), if (cursor.isNull(7)) null else cursor.getString(7), cursor.getLong(8)
-            )
+            while (cursor.moveToNext()) logs += cursor.toToolCallLogRecord()
             return logs
         }
     }
@@ -192,7 +236,9 @@ class SkillRepository(context: Context) {
     fun listRecentToolLogs(limit: Int = 100): List<ToolCallLogRecord> {
         database.readableDatabase.rawQuery(
             """
-            SELECT id, chat_id, message_id, tool_name, request_json, result_json, status, error_message, created_at_ms
+            SELECT id, request_id, chat_id, message_id, tool_name, request_json, result_json, status,
+                   skill_slug, skill_version, raw_model_output, parsed_tool_name, sanitized_args_json,
+                   sanitized_result_preview, duration_ms, error_code, error_message, created_at_ms
             FROM tool_call_log
             ORDER BY created_at_ms DESC
             LIMIT ?
@@ -200,17 +246,7 @@ class SkillRepository(context: Context) {
             arrayOf(limit.coerceIn(1, 200).toString())
         ).use { cursor ->
             val logs = mutableListOf<ToolCallLogRecord>()
-            while (cursor.moveToNext()) logs += ToolCallLogRecord(
-                cursor.getString(0),
-                cursor.getString(1),
-                if (cursor.isNull(2)) null else cursor.getString(2),
-                cursor.getString(3),
-                cursor.getString(4),
-                if (cursor.isNull(5)) null else cursor.getString(5),
-                runCatching { ToolCallStatus.valueOf(cursor.getString(6)) }.getOrDefault(ToolCallStatus.FAILED),
-                if (cursor.isNull(7)) null else cursor.getString(7),
-                cursor.getLong(8)
-            )
+            while (cursor.moveToNext()) logs += cursor.toToolCallLogRecord()
             return logs
         }
     }
@@ -302,6 +338,31 @@ class SkillRepository(context: Context) {
     )
 
     private fun Cursor.toChatSkillStateRecord() = ChatSkillStateRecord(getString(0), getString(1), getString(2), getInt(3) != 0, getInt(4) != 0, getLong(5))
+
+    private fun Cursor.toToolCallLogRecord() = ToolCallLogRecord(
+        id = getString(0),
+        requestId = if (isNull(1)) null else getString(1),
+        chatId = getString(2),
+        messageId = if (isNull(3)) null else getString(3),
+        toolName = getString(4),
+        requestJson = getString(5),
+        resultJson = if (isNull(6)) null else getString(6),
+        status = runCatching { ToolCallStatus.valueOf(getString(7)) }.getOrDefault(ToolCallStatus.EXECUTION_FAILED),
+        skillSlug = if (isNull(8)) null else getString(8),
+        skillVersion = if (isNull(9)) null else getLong(9),
+        rawModelOutput = if (isNull(10)) null else getString(10),
+        parsedToolName = if (isNull(11)) null else getString(11),
+        sanitizedArgsJson = if (isNull(12)) null else getString(12),
+        sanitizedResultPreview = if (isNull(13)) null else getString(13),
+        durationMs = if (isNull(14)) null else getLong(14),
+        errorCode = if (isNull(15)) null else getString(15),
+        errorMessage = if (isNull(16)) null else getString(16),
+        createdAtMs = getLong(17),
+    )
+
+    private companion object {
+        const val MAX_RAW_MODEL_OUTPUT_CHARS = 2_000
+    }
 }
 
 fun JSONArray.toStringList(): List<String> {

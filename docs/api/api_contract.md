@@ -329,7 +329,7 @@ Response: safe tool metadata only.
 
 Auth: authenticated chat owner.
 
-Response: `{"logs":[{"id":"...","toolName":"...","status":"SUCCESS","errorMessage":null,"createdAtMs":0}]}`
+Response: `{"logs":[{"id":"...","requestId":"...","chatId":"...","messageId":"...","toolName":"...","parsedToolName":"...","status":"SUCCESS","skillSlug":"default","skillVersion":0,"durationMs":12,"errorCode":null,"errorMessage":null,"argumentsPreview":"{}","requestPreview":"...","resultPreview":"...","createdAtMs":0}]}`
 
 ## Admin Routes
 
@@ -353,7 +353,7 @@ Response includes admin tool metadata, danger levels, allowed skills, and schema
 
 ### `GET /api/admin/tools/logs`
 
-Returns recent tool calls across chats with chat/message references, status, error, and sanitized request/result previews.
+Returns recent tool calls across chats with chat/message references, request ID, skill slug/version, taxonomy status, duration, error code/message, and sanitized request/argument/result previews.
 
 ### `POST /api/admin/skills`
 
