@@ -7,10 +7,12 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.min
 
 class AuthRepository(context: Context) {
     private val database = AppDatabase(context.applicationContext)
     private val secureRandom = SecureRandom()
+    private val failedLogins = mutableMapOf<String, FailedLoginState>()
 
     @Synchronized
     fun register(username: String?, password: String?): AuthResult {
@@ -50,11 +52,17 @@ class AuthRepository(context: Context) {
         val normalized = normalizeUsername(username?.trim().orEmpty())
         val cleanPassword = password.orEmpty()
         if (normalized.isBlank() || cleanPassword.isBlank()) return AuthResult.InvalidFields
+        throttleFor(normalized, System.currentTimeMillis())?.let { return it }
 
-        val row = findUserAuthRow(normalized) ?: return AuthResult.InvalidCredentials
-        if (!PasswordHasher.verifyPassword(cleanPassword, row.passwordHash, row.passwordSalt)) {
+        val row = findUserAuthRow(normalized) ?: run {
+            recordFailedLogin(normalized, System.currentTimeMillis())
             return AuthResult.InvalidCredentials
         }
+        if (!PasswordHasher.verifyPassword(cleanPassword, row.passwordHash, row.passwordSalt)) {
+            recordFailedLogin(normalized, System.currentTimeMillis())
+            return AuthResult.InvalidCredentials
+        }
+        failedLogins.remove(normalized)
         return AuthResult.Success(createSession(row.user, System.currentTimeMillis()))
     }
 
@@ -71,7 +79,7 @@ class AuthRepository(context: Context) {
         val now = System.currentTimeMillis()
         database.readableDatabase.rawQuery(
             """
-            SELECT u.id, u.username, u.role, s.expires_at_ms
+            SELECT u.id, u.username, u.role, s.created_at_ms, s.last_seen_at_ms, s.expires_at_ms
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = ?
@@ -80,7 +88,10 @@ class AuthRepository(context: Context) {
             arrayOf(tokenHash)
         ).use { cursor ->
             if (!cursor.moveToFirst()) return null
-            if (!cursor.isNull(3) && cursor.getLong(3) <= now) {
+            val createdAtMs = cursor.getLong(3)
+            val lastSeenAtMs = cursor.getLong(4)
+            val expiresAtMs = if (cursor.isNull(5)) createdAtMs + SESSION_ABSOLUTE_TIMEOUT_MS else cursor.getLong(5)
+            if (expiresAtMs <= now || lastSeenAtMs + SESSION_IDLE_TIMEOUT_MS <= now) {
                 database.writableDatabase.delete("sessions", "token_hash = ?", arrayOf(tokenHash))
                 return null
             }
@@ -96,6 +107,19 @@ class AuthRepository(context: Context) {
                 role = UserRole.valueOf(cursor.getString(2)),
             )
         }
+    }
+
+    @Synchronized
+    fun logoutAllForToken(token: String?): Boolean {
+        if (token.isNullOrBlank()) return false
+        val tokenHash = hashSessionToken(token)
+        val userId = database.readableDatabase.rawQuery(
+            "SELECT user_id FROM sessions WHERE token_hash = ? LIMIT 1",
+            arrayOf(tokenHash)
+        ).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        } ?: return false
+        return database.writableDatabase.delete("sessions", "user_id = ?", arrayOf(userId)) > 0
     }
 
     fun requireUser(token: String?): AuthUser? = currentUser(token)
@@ -138,6 +162,7 @@ class AuthRepository(context: Context) {
             id = UUID.randomUUID().toString(),
             token = token,
             user = user,
+            expiresAtMs = now + SESSION_ABSOLUTE_TIMEOUT_MS,
         )
         database.writableDatabase.insertOrThrow(
             "sessions",
@@ -148,10 +173,38 @@ class AuthRepository(context: Context) {
                 put("user_id", user.id)
                 put("created_at_ms", now)
                 put("last_seen_at_ms", now)
-                putNull("expires_at_ms")
+                put("expires_at_ms", session.expiresAtMs)
             }
         )
         return session
+    }
+
+    private fun throttleFor(normalized: String, now: Long): AuthResult.Throttled? {
+        val state = failedLogins[normalized] ?: return null
+        if (now - state.windowStartMs > FAILED_LOGIN_WINDOW_MS) {
+            failedLogins.remove(normalized)
+            return null
+        }
+        if (state.blockedUntilMs > now) {
+            return AuthResult.Throttled(((state.blockedUntilMs - now) / 1000L).coerceAtLeast(1L))
+        }
+        return null
+    }
+
+    private fun recordFailedLogin(normalized: String, now: Long) {
+        val existing = failedLogins[normalized]
+        val state = if (existing == null || now - existing.windowStartMs > FAILED_LOGIN_WINDOW_MS) {
+            FailedLoginState(failures = 1, windowStartMs = now, blockedUntilMs = 0L)
+        } else {
+            val failures = existing.failures + 1
+            val blockedUntil = if (failures >= FAILED_LOGIN_LIMIT) {
+                now + min(MAX_FAILED_LOGIN_BACKOFF_MS, FAILED_LOGIN_BACKOFF_MS * (failures - FAILED_LOGIN_LIMIT + 1))
+            } else {
+                0L
+            }
+            existing.copy(failures = failures, blockedUntilMs = blockedUntil)
+        }
+        failedLogins[normalized] = state
     }
 
     private fun findUserByNormalized(normalized: String): AuthUser? {
@@ -210,4 +263,19 @@ class AuthRepository(context: Context) {
         val passwordHash: String,
         val passwordSalt: String,
     )
+
+    private data class FailedLoginState(
+        val failures: Int,
+        val windowStartMs: Long,
+        val blockedUntilMs: Long,
+    )
+
+    companion object {
+        const val SESSION_ABSOLUTE_TIMEOUT_MS = 12L * 60L * 60L * 1000L
+        const val SESSION_IDLE_TIMEOUT_MS = 2L * 60L * 60L * 1000L
+        const val FAILED_LOGIN_LIMIT = 5
+        const val FAILED_LOGIN_WINDOW_MS = 15L * 60L * 1000L
+        const val FAILED_LOGIN_BACKOFF_MS = 60L * 1000L
+        const val MAX_FAILED_LOGIN_BACKOFF_MS = 5L * 60L * 1000L
+    }
 }

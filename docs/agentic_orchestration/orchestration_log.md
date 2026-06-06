@@ -70,3 +70,53 @@ Results:
 
 Next action:
 - Commit this state update and create codex/orchestration/phase1-api-security-foundation.
+
+## 2026-06-06T17:42:51+02:00
+
+Branch: codex/orchestration/phase1-api-security-foundation
+
+Phase: Phase 1
+
+Action taken:
+- Created and committed `docs/audits/current/phase1_preimplementation_audit.md`.
+- Implemented a first Phase 1 backend slice covering explicit security mode mapping, session absolute/idle timeout, failed-login backoff, logout-all-current-user, request ID headers, structured error details, debug route gating in `TRUSTED_LAN`, and tiered health fields.
+- Ran whitespace and script syntax checks.
+- Attempted the required APK compile gate.
+- Checked for an alternate Gradle executable after the compile command failed.
+- Stopped Phase 1 because APK compilation is a hard gate and Gradle is unavailable.
+
+Files changed:
+- app/src/main/java/com/example/androidhostllm/AuthModels.kt
+- app/src/main/java/com/example/androidhostllm/AuthRepository.kt
+- app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt
+- app/src/main/java/com/example/androidhostllm/MainActivity.kt
+- app/src/main/java/com/example/androidhostllm/SecurityMode.kt
+- docs/audits/current/phase1_preimplementation_audit.md
+- docs/agentic_orchestration/orchestration_state.md
+- docs/agentic_orchestration/orchestration_log.md
+- docs/agentic_orchestration/orchestration_blockers.md
+
+Checks run:
+- git diff --check
+- ./gradlew clean assembleDebug
+- command -v gradle || true
+- command -v java || true
+- java -version
+- find /home/akb -maxdepth 5 -type f -name gradle -perm -111
+- ls -la ~/.gradle/wrapper/dists
+- find ~/.gradle -maxdepth 4 -type f -name 'gradle-*.zip'
+- bash -n test_auth_foundation.sh
+- bash -n test_mvp_full_stack.sh
+- bash -n test_skills_tools_thinking.sh
+- bash -n test_chat_scoped_files_and_markdown.sh
+
+Results:
+- Passed: git diff --check.
+- Passed: bash syntax checks for the listed shell scripts.
+- Blocked: ./gradlew clean assembleDebug exited 127 because Gradle is not installed on PATH.
+- Java 17 is installed at /usr/bin/java.
+- No alternate Gradle executable was found under PATH, /home/akb, /opt/gradle*, /usr/local/gradle*, or ~/.gradle wrapper distributions.
+- APK was not compiled.
+
+Next action:
+- Install Gradle 8.9+ or provide GRADLE_CMD pointing to a valid Gradle executable, then rerun Phase 1 compile and continue from this phase branch.
