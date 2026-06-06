@@ -355,6 +355,30 @@ Response includes admin tool metadata, danger levels, allowed skills, and schema
 
 Returns recent tool calls across chats with chat/message references, request ID, skill slug/version, taxonomy status, duration, error code/message, and sanitized request/argument/result previews.
 
+### `GET /api/admin/ops/export`
+
+Returns a JSON backup bundle with schema version, export timestamp, safe users, chats, messages, uploaded Markdown metadata/content, file chunks, chat-file state, skills, chat skill state, tool metadata, and safe app settings.
+
+Excludes password hashes, salts, sessions, token hashes, Hugging Face token values, and raw storage paths.
+
+### `GET /api/admin/ops/diagnostics`
+
+Returns sanitized diagnostics with app/database version, server mode, health, model loaded status, aggregate counts, storage scan, recent sanitized errors, and route matrix reference. Excludes secrets and full user content.
+
+### `GET /api/admin/ops/storage/scan`
+
+Returns orphan counts for file chunks, chat-file attachments, context states, tool logs, missing stored files, orphan disk files, orphan disk bytes, and the required cleanup confirmation token.
+
+### `POST /api/admin/ops/storage/cleanup`
+
+Request:
+
+```json
+{"confirm":"cleanup-orphans"}
+```
+
+Deletes only orphaned maintenance rows and orphan disk files. Missing confirmation returns `400 confirmation_required`.
+
 ### `POST /api/admin/skills`
 
 Request: custom skill JSON with slug/display/prompt/tool settings.

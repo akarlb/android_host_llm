@@ -622,3 +622,52 @@ Results:
 
 Next action:
 - Commit this state update and create `codex/orchestration/phase6-local-ops-readiness`.
+
+## 2026-06-06T19:06:29+02:00
+
+Branch: codex/orchestration/phase6-local-ops-readiness
+
+Phase: Phase 6
+
+Action taken:
+- Added admin-only JSON backup export excluding password hashes, salts, sessions, token hashes, Hugging Face token values, and raw storage paths.
+- Added admin-only sanitized diagnostics export.
+- Added admin-only storage orphan scan and explicit-confirmation cleanup.
+- Added admin UI controls for backup, diagnostics, scan, and cleanup.
+- Added `test_local_ops.sh` live smoke script.
+- Updated README, API contract, route auth matrix, preimplementation audit, completion audit, and handoff.
+
+Files changed:
+- app/src/main/java/com/example/androidhostllm/AppDatabase.kt
+- app/src/main/java/com/example/androidhostllm/LocalOpsRepository.kt
+- app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt
+- app/src/main/assets/web/admin.html
+- app/src/main/assets/web/app.js
+- README.md
+- docs/api/api_contract.md
+- docs/security/route_auth_matrix.md
+- test_local_ops.sh
+- docs/audits/current/phase6_preimplementation_audit.md
+- docs/audits/current/phase6_local_ops_readiness_handoff.md
+- docs/audits/current/phase6_completion_audit.md
+
+Checks run:
+- git diff --check
+- bash -n test_local_ops.sh
+- bash -n test_admin_ui.sh
+- bash -n test_web_ui_smoke.sh
+- bash -n test_chat_api.sh
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew compileDebugKotlin
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew lint
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew check
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug
+
+Results:
+- All listed checks passed.
+- APK compile passed.
+- Live `test_local_ops.sh` execution skipped because no running phone server is active in this shell.
+- Gradle unit test tasks passed as `NO-SOURCE` because no unit test files exist.
+
+Next action:
+- Commit Phase 6, run final branch compile, and merge into `codex/orchestration-phases-1-7`.

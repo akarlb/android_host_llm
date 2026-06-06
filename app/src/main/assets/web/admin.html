@@ -68,6 +68,16 @@
           <div id="admin-files" class="recent-files"></div>
         </section>
         <section class="admin-panel">
+          <h2>Local operations</h2>
+          <div class="button-row">
+            <button id="ops-export-button" type="button">Download backup</button>
+            <button id="ops-diagnostics-button" type="button">Download diagnostics</button>
+            <button id="ops-scan-button" type="button">Scan storage</button>
+            <button id="ops-cleanup-button" type="button">Cleanup orphans</button>
+          </div>
+          <pre id="ops-output" class="console-output"></pre>
+        </section>
+        <section class="admin-panel">
           <div class="panel-heading">
             <h2>Skills</h2>
             <button id="skill-new-button" type="button">New custom skill</button>

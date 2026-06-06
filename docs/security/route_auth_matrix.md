@@ -42,6 +42,10 @@ Security modes:
 | `GET /api/admin/status` | Admin | Admin-only | Admin-only | Counts, URLs, generation status, no secrets | Medium |
 | `GET /api/admin/users` | Admin | Admin-only | Admin-only | User ids/names/roles/counts, no password/session fields | Medium |
 | `GET /api/admin/files` | Admin | Admin-only | Admin-only | File ownership metadata, no raw storage paths | Medium |
+| `GET /api/admin/ops/export` | Admin | Admin-only | Admin-only | Backup bundle with user content, no auth secrets/raw paths | High |
+| `GET /api/admin/ops/diagnostics` | Admin | Admin-only | Admin-only | Sanitized diagnostics and counts | Medium |
+| `GET /api/admin/ops/storage/scan` | Admin | Admin-only | Admin-only | Orphan counts and cleanup confirmation token | Medium |
+| `POST /api/admin/ops/storage/cleanup` | Admin | Admin-only | Admin-only | Deletes orphan maintenance rows/files only after explicit confirmation | High |
 | `GET /api/admin/tools` | Admin | Admin-only | Admin-only | Tool schemas and danger metadata | Medium |
 | `GET /api/admin/tools/logs` | Admin | Admin-only | Admin-only | Sanitized tool call previews | Medium |
 | `GET /api/admin/skills` | Admin | Admin-only | Admin-only | Full skill prompt/schema metadata | High |

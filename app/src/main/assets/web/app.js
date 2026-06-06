@@ -177,6 +177,10 @@
     $("skill-export-button").addEventListener("click", exportAdminSkills);
     $("skill-import-button").addEventListener("click", importAdminSkills);
     $("skill-test-form").addEventListener("submit", runSkillTest);
+    $("ops-export-button").addEventListener("click", downloadBackup);
+    $("ops-diagnostics-button").addEventListener("click", downloadDiagnostics);
+    $("ops-scan-button").addEventListener("click", scanStorage);
+    $("ops-cleanup-button").addEventListener("click", cleanupStorage);
     if (current.user.role !== "ADMIN") {
       $("admin-denied").hidden = false;
       return;
@@ -1071,6 +1075,52 @@
     } catch (error) {
       $("skill-test-output").textContent = error.message;
     }
+  }
+
+  async function downloadBackup() {
+    const bundle = await jsonRequest("/api/admin/ops/export");
+    downloadJson(`android-host-llm-backup-${Date.now()}.json`, bundle);
+    showOpsOutput({ status: "downloaded", schemaVersion: bundle.schemaVersion, exportedAtMs: bundle.exportedAtMs });
+  }
+
+  async function downloadDiagnostics() {
+    const diagnostics = await jsonRequest("/api/admin/ops/diagnostics");
+    downloadJson(`android-host-llm-diagnostics-${Date.now()}.json`, diagnostics);
+    showOpsOutput({ status: "downloaded", schemaVersion: diagnostics.schemaVersion, exportedAtMs: diagnostics.exportedAtMs, counts: diagnostics.counts });
+  }
+
+  async function scanStorage() {
+    const scan = await jsonRequest("/api/admin/ops/storage/scan");
+    showOpsOutput(scan);
+  }
+
+  async function cleanupStorage() {
+    const confirmText = window.prompt('Type cleanup-orphans to remove only orphaned maintenance rows/files.');
+    if (confirmText == null) return;
+    const result = await jsonRequest("/api/admin/ops/storage/cleanup", {
+      method: "POST",
+      body: JSON.stringify({ confirm: confirmText }),
+    });
+    showOpsOutput(result);
+    await loadAdminDashboard();
+  }
+
+  function showOpsOutput(value) {
+    const output = $("ops-output");
+    if (!output) return;
+    output.textContent = JSON.stringify(value, null, 2);
+  }
+
+  function downloadJson(filename, value) {
+    const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   }
 
   function renderDiagnostics(debug) {

@@ -241,8 +241,9 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN error_code TEXT NULL") }
     }
 
-    private companion object {
+    companion object {
         const val DATABASE_NAME = "android_host_llm.db"
         const val DATABASE_VERSION = 7
+        const val SCHEMA_VERSION = DATABASE_VERSION
     }
 }
