@@ -520,3 +520,53 @@ Results:
 
 Next action:
 - Commit this state update and create `codex/orchestration/phase5-skills-tools-hardening`.
+
+## 2026-06-06T18:53:06+02:00
+
+Branch: codex/orchestration/phase5-skills-tools-hardening
+
+Phase: Phase 5
+
+Action taken:
+- Added schema validator for supported local JSON object schemas.
+- Hardened tool-call parsing for exact JSON, fenced JSON, prose-wrapped single JSON object extraction, multiple-call rejection, unknown tools, oversized payloads, invalid arguments, extra fields, and executable-looking string args.
+- Added one-step tool-call repair and one-step strict-output repair.
+- Expanded tool execution taxonomy and tool log persistence with trace fields.
+- Added skill slug/version timestamp to tool logs.
+- Expanded admin tool log display.
+- Added future plugin/sandbox architecture design, manual checklist, API contract update, and Phase 5 audits/handoff.
+
+Files changed:
+- app/src/main/java/com/example/androidhostllm/JsonSchemaValidator.kt
+- app/src/main/java/com/example/androidhostllm/ToolRegistry.kt
+- app/src/main/java/com/example/androidhostllm/SkillModels.kt
+- app/src/main/java/com/example/androidhostllm/SkillRepository.kt
+- app/src/main/java/com/example/androidhostllm/AppDatabase.kt
+- app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt
+- app/src/main/assets/web/app.js
+- docs/architecture/tool_plugin_sandbox_design.md
+- docs/testing/phase5_skills_tools_manual_test_checklist.md
+- docs/audits/current/phase5_preimplementation_audit.md
+- docs/audits/current/phase5_skills_tools_hardening_handoff.md
+- docs/audits/current/phase5_completion_audit.md
+- docs/api/api_contract.md
+
+Checks run:
+- git diff --check
+- bash -n test_skills_tools_thinking.sh
+- bash -n test_web_ui_smoke.sh
+- bash -n test_chat_api.sh
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew compileDebugKotlin
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew lint
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew check
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug
+
+Results:
+- All listed checks passed.
+- APK compile passed.
+- Live model/tool repair validation skipped; manual checklist added.
+- Gradle unit test tasks passed as `NO-SOURCE` because no unit test files exist.
+
+Next action:
+- Commit Phase 5, run final branch compile, and merge into `codex/orchestration-phases-1-7`.

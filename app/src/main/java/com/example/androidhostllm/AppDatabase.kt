@@ -63,6 +63,10 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
             createSkillTables(db)
             addMessageThinkingColumns(db)
         }
+        if (oldVersion < 7) {
+            createSkillTables(db)
+            addToolLogTraceColumns(db)
+        }
     }
 
     private fun createChatTables(db: SQLiteDatabase) {
@@ -197,12 +201,21 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
             """
             CREATE TABLE IF NOT EXISTS tool_call_log (
                 id TEXT PRIMARY KEY,
+                request_id TEXT NULL,
                 chat_id TEXT NOT NULL,
                 message_id TEXT NULL,
                 tool_name TEXT NOT NULL,
                 request_json TEXT NOT NULL,
                 result_json TEXT NULL,
                 status TEXT NOT NULL,
+                skill_slug TEXT NULL,
+                skill_version INTEGER NULL,
+                raw_model_output TEXT NULL,
+                parsed_tool_name TEXT NULL,
+                sanitized_args_json TEXT NULL,
+                sanitized_result_preview TEXT NULL,
+                duration_ms INTEGER NULL,
+                error_code TEXT NULL,
                 error_message TEXT NULL,
                 created_at_ms INTEGER NOT NULL
             )
@@ -216,8 +229,20 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(
         runCatching { db.execSQL("ALTER TABLE messages ADD COLUMN raw_content TEXT NULL") }
     }
 
+    private fun addToolLogTraceColumns(db: SQLiteDatabase) {
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN request_id TEXT NULL") }
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN skill_slug TEXT NULL") }
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN skill_version INTEGER NULL") }
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN raw_model_output TEXT NULL") }
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN parsed_tool_name TEXT NULL") }
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN sanitized_args_json TEXT NULL") }
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN sanitized_result_preview TEXT NULL") }
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN duration_ms INTEGER NULL") }
+        runCatching { db.execSQL("ALTER TABLE tool_call_log ADD COLUMN error_code TEXT NULL") }
+    }
+
     private companion object {
         const val DATABASE_NAME = "android_host_llm.db"
-        const val DATABASE_VERSION = 6
+        const val DATABASE_VERSION = 7
     }
 }
