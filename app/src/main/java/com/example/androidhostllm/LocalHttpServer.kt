@@ -45,6 +45,7 @@ class LocalHttpServer(
     private val promptBudgetManager = PromptBudgetManager()
     private val skillRepository = SkillRepository(appContext)
     private val toolRegistry = ToolRegistry(chatRepository, fileRepository)
+    private val localOpsRepository = LocalOpsRepository(appContext)
     private val generationJobs = GenerationJobStore()
     private val securityMode = SecurityMode.fromServerMode(serverMode)
     private val requestId = ThreadLocal<String>()
@@ -94,6 +95,10 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/api/admin/status" -> adminStatusResponse(session)
             session.method == Method.GET && path == "/api/admin/users" -> adminUsersResponse(session)
             session.method == Method.GET && path == "/api/admin/files" -> adminFilesResponse(session)
+            session.method == Method.GET && path == "/api/admin/ops/export" -> adminOpsExportResponse(session)
+            session.method == Method.GET && path == "/api/admin/ops/diagnostics" -> adminOpsDiagnosticsResponse(session)
+            session.method == Method.GET && path == "/api/admin/ops/storage/scan" -> adminOpsStorageScanResponse(session)
+            session.method == Method.POST && path == "/api/admin/ops/storage/cleanup" -> adminOpsStorageCleanupResponse(session)
             session.method == Method.GET && path == "/api/admin/skills" -> adminSkillsResponse(session)
             session.method == Method.GET && path == "/api/admin/skills/export" -> adminExportSkillsResponse(session)
             session.method == Method.POST && path == "/api/admin/skills/import" -> adminImportSkillsResponse(session)
@@ -309,6 +314,10 @@ class LocalHttpServer(
                     .put("adminStatus", "GET /api/admin/status")
                     .put("adminUsers", "GET /api/admin/users")
                     .put("adminFiles", "GET /api/admin/files")
+                    .put("adminOpsExport", "GET /api/admin/ops/export")
+                    .put("adminOpsDiagnostics", "GET /api/admin/ops/diagnostics")
+                    .put("adminOpsStorageScan", "GET /api/admin/ops/storage/scan")
+                    .put("adminOpsStorageCleanup", "POST /api/admin/ops/storage/cleanup")
                     .put("adminSkills", "POST/PUT/DELETE /api/admin/skills")
                     .put("adminTools", "GET /api/admin/tools")
                     .put("adminToolLogs", "GET /api/admin/tools/logs")
@@ -322,6 +331,10 @@ class LocalHttpServer(
     }
 
     private fun healthResponse(): Response {
+        return jsonResponse(Response.Status.OK, healthJson())
+    }
+
+    private fun healthJson(): JSONObject {
         val storageWritable = runCatching {
             val probe = java.io.File(appContext.filesDir, ".health-write-check")
             probe.writeText("ok")
@@ -330,18 +343,15 @@ class LocalHttpServer(
         val databaseAvailable = runCatching {
             AppDatabase(appContext).readableDatabase.rawQuery("SELECT 1", emptyArray()).use { it.moveToFirst() }
         }.getOrDefault(false)
-        return jsonResponse(
-            Response.Status.OK,
-            JSONObject()
-                .put("status", "ok")
-                .put("appAlive", true)
-                .put("databaseAvailable", databaseAvailable)
-                .put("modelLoaded", liteRtLmManager.isLoaded())
-                .put("storageWritable", storageWritable)
-                .put("securityMode", securityMode.name)
-                .put("serverMode", serverMode)
-                .put("diagnostics", if (securityMode == SecurityMode.TRUSTED_LAN) "admin-required" else "local-dev-open")
-        )
+        return JSONObject()
+            .put("status", "ok")
+            .put("appAlive", true)
+            .put("databaseAvailable", databaseAvailable)
+            .put("modelLoaded", liteRtLmManager.isLoaded())
+            .put("storageWritable", storageWritable)
+            .put("securityMode", securityMode.name)
+            .put("serverMode", serverMode)
+            .put("diagnostics", if (securityMode == SecurityMode.TRUSTED_LAN) "admin-required" else "local-dev-open")
     }
 
     private fun modelsResponse(): Response {
@@ -590,6 +600,39 @@ class LocalHttpServer(
             fileRepository.listAdminFileOverviews().forEach { files.put(adminFileJson(it)) }
             jsonResponse(Response.Status.OK, JSONObject().put("files", files))
         }
+    }
+
+    private fun adminOpsExportResponse(session: IHTTPSession): Response = withAdmin(session) {
+        jsonResponse(
+            Response.Status.OK,
+            localOpsRepository.backupExport(
+                tools = toolRegistry.listAdminMetadata(),
+                safeSettings = safeAppSettingsJson(),
+            )
+        )
+    }
+
+    private fun adminOpsDiagnosticsResponse(session: IHTTPSession): Response = withAdmin(session) {
+        jsonResponse(
+            Response.Status.OK,
+            localOpsRepository.diagnostics(
+                health = healthJson(),
+                modelLoaded = liteRtLmManager.isLoaded(),
+                serverMode = serverMode,
+                recentErrors = recentSanitizedErrorsJson(),
+            )
+        )
+    }
+
+    private fun adminOpsStorageScanResponse(session: IHTTPSession): Response = withAdmin(session) {
+        jsonResponse(Response.Status.OK, localOpsRepository.storageScan())
+    }
+
+    private fun adminOpsStorageCleanupResponse(session: IHTTPSession): Response = withAdmin(session) cleanup@{
+        val json = readJsonRequest(session) ?: return@cleanup errorResponse(Response.Status.BAD_REQUEST, "bad_json", "Malformed JSON")
+        val result = localOpsRepository.cleanupOrphans(json.optString("confirm"))
+            ?: return@cleanup errorResponse(Response.Status.BAD_REQUEST, "confirmation_required", "Cleanup requires confirm=cleanup-orphans")
+        jsonResponse(Response.Status.OK, result)
     }
 
     private fun adminSkillsResponse(session: IHTTPSession): Response = withAdmin(session) {
@@ -1355,6 +1398,37 @@ class LocalHttpServer(
             .put("serverMode", serverMode)
             .put("streamingSupported", true)
             .put("modelId", modelId)
+    }
+
+    private fun safeAppSettingsJson(): JSONObject {
+        return JSONObject()
+            .put("responseMode", appPreferences.savedResponseMode().name)
+            .put("conversationMode", appPreferences.savedConversationMode().name)
+            .put("generationTimeoutSeconds", appPreferences.savedGenerationTimeoutSeconds())
+            .put("speculativeDecodingRequested", appPreferences.savedSpeculativeDecodingRequested())
+            .put("modelPathConfigured", appPreferences.savedModelPath() != null)
+            .put("huggingFaceTokenConfigured", appPreferences.savedHuggingFaceToken() != null)
+    }
+
+    private fun recentSanitizedErrorsJson(): JSONArray {
+        val array = JSONArray()
+        liteRtLmManager.performanceSnapshot().lastErrorShortMessage?.let {
+            array.put(JSONObject().put("source", "generation").put("message", sanitizeJsonPreview(it)))
+        }
+        skillRepository.listRecentToolLogs(limit = 20)
+            .filter { it.status != ToolCallStatus.SUCCESS }
+            .take(10)
+            .forEach { log ->
+                array.put(
+                    JSONObject()
+                        .put("source", "tool")
+                        .put("status", log.status.name)
+                        .put("errorCode", log.errorCode ?: JSONObject.NULL)
+                        .put("message", log.errorMessage?.let { sanitizeJsonPreview(it) } ?: JSONObject.NULL)
+                        .put("createdAtMs", log.createdAtMs)
+                )
+            }
+        return array
     }
 
     private fun benchmarkResultJson(

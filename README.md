@@ -492,6 +492,28 @@ The `/debug/perf` response includes backend status, model-loaded status, specula
 
 The `/debug/perf/history` endpoint returns the last 20 generation metric snapshots. It stores only timing/count/status data, not prompts or responses.
 
+## Local operations, backup, and diagnostics
+
+Admin-only local operations are available from `/admin` and via API:
+
+- `GET /api/admin/ops/export` downloads a JSON backup bundle with safe users, chats, messages, Markdown file metadata/content, file chunks, chat-file state, skills, chat skill state, tool metadata, safe app settings, schema version, and export timestamp.
+- `GET /api/admin/ops/diagnostics` downloads sanitized diagnostics with health, mode, model loaded status, DB schema version, counts, storage scan, recent sanitized errors, and route matrix reference.
+- `GET /api/admin/ops/storage/scan` reports orphaned chunks, attachments, context state rows, tool logs, missing stored files, and orphan disk files.
+- `POST /api/admin/ops/storage/cleanup` requires `{"confirm":"cleanup-orphans"}` and deletes only orphaned maintenance rows/files.
+
+Backups intentionally exclude password hashes, salts, sessions, token hashes, Hugging Face token values, and raw storage paths. Full chat/file restore is not implemented yet; custom skill import/export remains available in the Skills panel. Keep downloaded backup files private because they include chat and uploaded Markdown content.
+
+Fresh local readiness flow:
+
+1. Install the APK and open the app.
+2. Create the first account; it becomes `ADMIN`.
+3. Create normal users from `/register` as needed.
+4. Load a local `.litertlm` model or download a preset.
+5. Start the LAN server only on a trusted network.
+6. Visit `/health`, then `/admin`.
+7. Run `bash test_local_ops.sh` against the phone URL with `BASE_URL=http://<PHONE_IP>:8080`.
+8. Download a backup and diagnostics bundle before risky maintenance or upgrades.
+
 Remote config:
 
 ```sh
