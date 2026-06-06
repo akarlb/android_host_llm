@@ -68,6 +68,72 @@
           <div id="admin-files" class="recent-files"></div>
         </section>
         <section class="admin-panel">
+          <div class="panel-heading">
+            <h2>Skills</h2>
+            <button id="skill-new-button" type="button">New custom skill</button>
+          </div>
+          <div class="admin-grid">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Skill</th>
+                    <th>Type</th>
+                    <th>Enabled</th>
+                    <th>Tools</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="admin-skills"></tbody>
+              </table>
+            </div>
+            <form id="skill-form" class="admin-form">
+              <label>Slug <input id="skill-slug" name="slug" autocomplete="off"></label>
+              <label>Display name <input id="skill-display-name" name="displayName"></label>
+              <label>Description <textarea id="skill-description" name="description"></textarea></label>
+              <label>System prompt <textarea id="skill-system-prompt" name="systemPrompt"></textarea></label>
+              <label>Response mode <input id="skill-response-mode" name="responseMode" placeholder="CODING_CONCISE, BALANCED, DETAILED, or blank"></label>
+              <label>Tool-use mode <select id="skill-tool-use-mode" name="toolUseMode"><option>NONE</option><option>OPTIONAL</option><option>REQUIRED</option></select></label>
+              <label>Allowed tools <input id="skill-allowed-tools" name="allowedTools" placeholder="comma-separated tool names"></label>
+              <label>Output schema JSON <textarea id="skill-output-schema" name="outputSchema"></textarea></label>
+              <label class="checkbox-row"><input id="skill-thinking-default" type="checkbox"> Thinking default</label>
+              <label class="checkbox-row"><input id="skill-show-thinking-default" type="checkbox"> Show thinking default</label>
+              <label class="checkbox-row"><input id="skill-strict-output" type="checkbox"> Strict output</label>
+              <label class="checkbox-row"><input id="skill-enabled" type="checkbox"> Enabled</label>
+              <div class="button-row">
+                <button id="skill-save-button" type="submit">Save skill</button>
+                <button id="skill-delete-button" type="button">Delete/disable</button>
+              </div>
+            </form>
+          </div>
+          <div class="button-row">
+            <button id="skill-export-button" type="button">Export custom skills</button>
+            <button id="skill-import-button" type="button">Import custom skills</button>
+          </div>
+          <textarea id="skill-import-export" class="json-box" placeholder='{"skills":[]}'></textarea>
+        </section>
+        <section class="admin-panel">
+          <h2>Tools</h2>
+          <div id="admin-tools" class="tool-catalog"></div>
+        </section>
+        <section class="admin-panel">
+          <h2>Skill x Tool permissions</h2>
+          <div id="tool-matrix" class="table-wrap"></div>
+        </section>
+        <section class="admin-panel">
+          <h2>Tool logs</h2>
+          <div id="tool-logs" class="recent-files"></div>
+        </section>
+        <section class="admin-panel">
+          <h2>Skill Test Console</h2>
+          <form id="skill-test-form" class="admin-form">
+            <label>Skill <select id="skill-test-select"></select></label>
+            <label>Prompt <textarea id="skill-test-prompt"></textarea></label>
+            <button type="submit">Run test</button>
+          </form>
+          <pre id="skill-test-output" class="console-output"></pre>
+        </section>
+        <section class="admin-panel">
           <h2>Diagnostics</h2>
           <div id="admin-diagnostics" class="diagnostic-links"></div>
         </section>

@@ -122,7 +122,73 @@ grep -Fq '"files"' <<<"$RESPONSE_BODY" || fail "admin files omitted files: $RESP
 grep -Fvq "storage_path" <<<"$RESPONSE_BODY" || fail "admin files leaked storage paths: $RESPONSE_BODY"
 pass "admin can access /api/admin/files without storage paths"
 
+status="$(request GET /api/admin/skills "" "$ADMIN_TOKEN")"
+[[ "$status" == "200" ]] || fail "admin skills returned $status: $RESPONSE_BODY"
+grep -Fq '"systemPrompt"' <<<"$RESPONSE_BODY" || fail "admin skills omitted prompt metadata: $RESPONSE_BODY"
+pass "admin can list full skill metadata"
+
+CUSTOM_SLUG="admin-skill-${STAMP}"
+skill_body="$(python3 - <<PY
+import json
+print(json.dumps({
+  "slug": "$CUSTOM_SLUG",
+  "displayName": "Admin Skill $STAMP",
+  "description": "Created by admin UI smoke test.",
+  "systemPrompt": "Answer briefly.",
+  "toolUseMode": "OPTIONAL",
+  "allowedTools": ["get_current_datetime"],
+  "outputSchema": {"type": "object"},
+  "strictOutput": False,
+  "enabled": True
+}))
+PY
+)"
+status="$(request POST /api/admin/skills "$skill_body" "$ADMIN_TOKEN")"
+[[ "$status" == "200" ]] || fail "admin create skill returned $status: $RESPONSE_BODY"
+grep -Fq "\"slug\":\"$CUSTOM_SLUG\"" <<<"$RESPONSE_BODY" || fail "created skill response omitted slug: $RESPONSE_BODY"
+pass "admin can create custom skill"
+
+edit_body="$(python3 - <<PY
+import json
+print(json.dumps({
+  "displayName": "Admin Skill Edited $STAMP",
+  "description": "Edited by admin UI smoke test.",
+  "systemPrompt": "Answer in one sentence.",
+  "toolUseMode": "NONE",
+  "allowedTools": [],
+  "enabled": True
+}))
+PY
+)"
+status="$(request PUT "/api/admin/skills/$CUSTOM_SLUG" "$edit_body" "$ADMIN_TOKEN")"
+[[ "$status" == "200" ]] || fail "admin edit skill returned $status: $RESPONSE_BODY"
+grep -Fq "Admin Skill Edited" <<<"$RESPONSE_BODY" || fail "edited skill response omitted updated display name: $RESPONSE_BODY"
+pass "admin can edit custom skill"
+
+status="$(request GET /api/admin/tools "" "$ADMIN_TOKEN")"
+[[ "$status" == "200" ]] || fail "admin tools returned $status: $RESPONSE_BODY"
+grep -Fq '"inputSchema"' <<<"$RESPONSE_BODY" || fail "admin tools omitted schemas: $RESPONSE_BODY"
+pass "admin can list tool catalog with schemas"
+
+status="$(request GET /api/admin/tools/logs "" "$ADMIN_TOKEN")"
+[[ "$status" == "200" ]] || fail "admin tool logs returned $status: $RESPONSE_BODY"
+grep -Fq '"logs"' <<<"$RESPONSE_BODY" || fail "admin tool logs omitted logs: $RESPONSE_BODY"
+pass "admin can list tool logs"
+
+status="$(request GET /api/admin/skills "" "$USER_TOKEN")"
+[[ "$status" == "403" ]] || fail "normal user admin skills returned $status: $RESPONSE_BODY"
+pass "normal user cannot access admin skills"
+
+status="$(request POST /api/admin/skills/test "{\"skillSlug\":\"$CUSTOM_SLUG\",\"prompt\":\"Hello\"}" "$ADMIN_TOKEN")"
+[[ "$status" == "200" || "$status" == "503" ]] || fail "admin skill test returned $status: $RESPONSE_BODY"
+pass "admin skill test endpoint is reachable and reports model-loaded state"
+
+status="$(request DELETE "/api/admin/skills/$CUSTOM_SLUG" "" "$ADMIN_TOKEN")"
+[[ "$status" == "200" ]] || fail "admin delete skill returned $status: $RESPONSE_BODY"
+pass "admin can delete custom skill"
+
 assert_html_with_token /admin "$ADMIN_TOKEN" "admin-dashboard"
+assert_html_with_token /admin "$ADMIN_TOKEN" "Skill Test Console"
 assert_html_with_token /admin "$USER_TOKEN" "Access denied" "403"
 
 admin_unauth_headers="$(mktemp)"

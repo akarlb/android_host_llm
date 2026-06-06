@@ -9,6 +9,10 @@
     skills: [],
     currentSkill: null,
     skillState: null,
+    adminSkills: [],
+    adminTools: [],
+    adminToolLogs: [],
+    selectedAdminSkill: null,
     streaming: false,
     contextMessage: "",
     toolStatus: "",
@@ -158,6 +162,12 @@
     $("admin-current-user").textContent = `${current.user.username} (${current.user.role})`;
     $("admin-logout-button").addEventListener("click", logout);
     $("admin-refresh-button").addEventListener("click", loadAdminDashboard);
+    $("skill-new-button").addEventListener("click", () => editAdminSkill(null));
+    $("skill-form").addEventListener("submit", saveAdminSkill);
+    $("skill-delete-button").addEventListener("click", deleteAdminSkill);
+    $("skill-export-button").addEventListener("click", exportAdminSkills);
+    $("skill-import-button").addEventListener("click", importAdminSkills);
+    $("skill-test-form").addEventListener("submit", runSkillTest);
     if (current.user.role !== "ADMIN") {
       $("admin-denied").hidden = false;
       return;
@@ -169,15 +179,27 @@
   async function loadAdminDashboard() {
     showError("admin-error", "");
     try {
-      const [status, users, files] = await Promise.all([
+      const [status, users, files, skills, tools, logs] = await Promise.all([
         jsonRequest("/api/admin/status"),
         jsonRequest("/api/admin/users"),
         jsonRequest("/api/admin/files"),
+        jsonRequest("/api/admin/skills"),
+        jsonRequest("/api/admin/tools"),
+        jsonRequest("/api/admin/tools/logs"),
       ]);
+      state.adminSkills = skills.skills || [];
+      state.adminTools = tools.tools || [];
+      state.adminToolLogs = logs.logs || [];
       renderAdminStatus(status);
       renderAdminUrls(status);
       renderAdminUsers(users.users || []);
       renderAdminFiles(status, files.files || []);
+      renderAdminSkills();
+      renderAdminTools();
+      renderToolMatrix();
+      renderToolLogs();
+      renderSkillTestOptions();
+      if (!state.selectedAdminSkill) editAdminSkill(state.adminSkills.find((skill) => !skill.builtIn) || null);
       renderDiagnostics(status.debug || {});
     } catch (error) {
       if (error.message.includes("(401)")) $("admin-login").hidden = false;
@@ -755,6 +777,174 @@
       `;
       list.appendChild(item);
     });
+  }
+
+  function renderAdminSkills() {
+    const body = $("admin-skills");
+    body.innerHTML = "";
+    state.adminSkills.forEach((skill) => {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td><strong>${escapeText(skill.displayName)}</strong><div class="file-meta">${escapeText(skill.slug)}</div></td>
+        <td>${skill.builtIn ? "Built-in" : "Custom"}</td>
+        <td>${skill.enabled ? "Yes" : "No"}</td>
+        <td>${escapeText((skill.allowedTools || []).join(", ") || "-")}</td>
+        <td><button type="button">Edit</button></td>
+      `;
+      row.querySelector("button").addEventListener("click", () => editAdminSkill(skill));
+      body.appendChild(row);
+    });
+  }
+
+  function editAdminSkill(skill) {
+    state.selectedAdminSkill = skill;
+    $("skill-slug").value = skill?.slug || "";
+    $("skill-slug").disabled = Boolean(skill?.builtIn);
+    $("skill-display-name").value = skill?.displayName || "";
+    $("skill-display-name").disabled = Boolean(skill?.builtIn);
+    $("skill-description").value = skill?.description || "";
+    $("skill-description").disabled = Boolean(skill?.builtIn);
+    $("skill-system-prompt").value = skill?.systemPrompt || "";
+    $("skill-system-prompt").disabled = Boolean(skill?.builtIn);
+    $("skill-response-mode").value = skill?.responseMode || "";
+    $("skill-response-mode").disabled = Boolean(skill?.builtIn);
+    $("skill-tool-use-mode").value = skill?.toolUseMode || "NONE";
+    $("skill-tool-use-mode").disabled = Boolean(skill?.builtIn);
+    $("skill-allowed-tools").value = (skill?.allowedTools || []).join(", ");
+    $("skill-allowed-tools").disabled = Boolean(skill?.builtIn);
+    $("skill-output-schema").value = skill?.outputSchema ? JSON.stringify(skill.outputSchema, null, 2) : "";
+    $("skill-output-schema").disabled = Boolean(skill?.builtIn);
+    $("skill-thinking-default").checked = Boolean(skill?.thinkingDefault);
+    $("skill-thinking-default").disabled = Boolean(skill?.builtIn);
+    $("skill-show-thinking-default").checked = Boolean(skill?.showThinkingDefault);
+    $("skill-show-thinking-default").disabled = Boolean(skill?.builtIn);
+    $("skill-strict-output").checked = Boolean(skill?.strictOutput);
+    $("skill-strict-output").disabled = Boolean(skill?.builtIn);
+    $("skill-enabled").checked = skill ? Boolean(skill.enabled) : true;
+    $("skill-save-button").textContent = skill?.builtIn ? "Save enabled state" : "Save skill";
+    $("skill-delete-button").textContent = skill?.builtIn ? "Disable built-in" : "Delete custom";
+  }
+
+  function skillFormPayload() {
+    let outputSchema = null;
+    const rawSchema = $("skill-output-schema").value.trim();
+    if (rawSchema) outputSchema = JSON.parse(rawSchema);
+    return {
+      slug: requireInput("skill-slug"),
+      displayName: requireInput("skill-display-name"),
+      description: $("skill-description").value.trim(),
+      systemPrompt: $("skill-system-prompt").value.trim(),
+      responseMode: $("skill-response-mode").value.trim() || null,
+      toolUseMode: $("skill-tool-use-mode").value,
+      allowedTools: $("skill-allowed-tools").value.split(",").map((item) => item.trim()).filter(Boolean),
+      outputSchema,
+      thinkingDefault: $("skill-thinking-default").checked,
+      showThinkingDefault: $("skill-show-thinking-default").checked,
+      strictOutput: $("skill-strict-output").checked,
+      enabled: $("skill-enabled").checked,
+    };
+  }
+
+  async function saveAdminSkill(event) {
+    event.preventDefault();
+    showError("admin-error", "");
+    try {
+      const payload = skillFormPayload();
+      const path = state.selectedAdminSkill ? `/api/admin/skills/${encodeURIComponent(state.selectedAdminSkill.slug)}` : "/api/admin/skills";
+      await jsonRequest(path, { method: state.selectedAdminSkill ? "PUT" : "POST", body: JSON.stringify(payload) });
+      await loadAdminDashboard();
+    } catch (error) {
+      showError("admin-error", error.message);
+    }
+  }
+
+  async function deleteAdminSkill() {
+    const skill = state.selectedAdminSkill;
+    if (!skill) return;
+    if (!window.confirm(skill.builtIn ? "Disable this built-in skill?" : "Delete this custom skill?")) return;
+    await jsonRequest(`/api/admin/skills/${encodeURIComponent(skill.slug)}`, { method: "DELETE" });
+    state.selectedAdminSkill = null;
+    await loadAdminDashboard();
+  }
+
+  async function exportAdminSkills() {
+    const result = await jsonRequest("/api/admin/skills/export");
+    $("skill-import-export").value = JSON.stringify(result, null, 2);
+  }
+
+  async function importAdminSkills() {
+    const body = $("skill-import-export").value.trim();
+    if (!body) return;
+    JSON.parse(body);
+    await jsonRequest("/api/admin/skills/import", { method: "POST", body });
+    await loadAdminDashboard();
+  }
+
+  function renderAdminTools() {
+    const holder = $("admin-tools");
+    holder.innerHTML = "";
+    state.adminTools.forEach((tool) => {
+      const item = document.createElement("details");
+      item.className = "tool-card";
+      item.innerHTML = `
+        <summary><strong>${escapeText(tool.displayName)}</strong> <span class="file-meta">${escapeText(tool.name)} - ${escapeText(tool.dangerLevel || "SAFE")}</span></summary>
+        <p>${escapeText(tool.description)}</p>
+        <pre>${escapeText(JSON.stringify({ inputSchema: tool.inputSchema, outputSchema: tool.outputSchema, allowedForSkills: tool.allowedForSkills || [] }, null, 2))}</pre>
+      `;
+      holder.appendChild(item);
+    });
+  }
+
+  function renderToolMatrix() {
+    const holder = $("tool-matrix");
+    const rows = state.adminSkills.map((skill) => {
+      const cells = state.adminTools.map((tool) => `<td>${(skill.allowedTools || []).includes(tool.name) ? "Allowed" : "-"}</td>`).join("");
+      return `<tr><th>${escapeText(skill.slug)}</th>${cells}</tr>`;
+    }).join("");
+    holder.innerHTML = `<table><thead><tr><th>Skill</th>${state.adminTools.map((tool) => `<th>${escapeText(tool.name)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  function renderToolLogs() {
+    const holder = $("tool-logs");
+    holder.innerHTML = "";
+    if (!state.adminToolLogs.length) {
+      holder.innerHTML = '<p class="muted">No tool calls recorded yet.</p>';
+      return;
+    }
+    state.adminToolLogs.forEach((log) => {
+      const item = document.createElement("details");
+      item.className = "recent-file";
+      item.innerHTML = `
+        <summary><strong>${escapeText(log.toolName)}</strong> <span class="file-meta">${escapeText(log.status)} - ${escapeText(formatDate(log.createdAtMs))}</span></summary>
+        <pre>${escapeText(JSON.stringify({ chatId: log.chatId, messageId: log.messageId, errorMessage: log.errorMessage, requestPreview: log.requestPreview, resultPreview: log.resultPreview }, null, 2))}</pre>
+      `;
+      holder.appendChild(item);
+    });
+  }
+
+  function renderSkillTestOptions() {
+    const select = $("skill-test-select");
+    select.innerHTML = "";
+    state.adminSkills.filter((skill) => skill.enabled).forEach((skill) => {
+      const option = document.createElement("option");
+      option.value = skill.slug;
+      option.textContent = `${skill.displayName} (${skill.slug})`;
+      select.appendChild(option);
+    });
+  }
+
+  async function runSkillTest(event) {
+    event.preventDefault();
+    $("skill-test-output").textContent = "";
+    try {
+      const result = await jsonRequest("/api/admin/skills/test", {
+        method: "POST",
+        body: JSON.stringify({ skillSlug: $("skill-test-select").value, prompt: $("skill-test-prompt").value }),
+      });
+      $("skill-test-output").textContent = result.response || JSON.stringify(result, null, 2);
+    } catch (error) {
+      $("skill-test-output").textContent = error.message;
+    }
   }
 
   function renderDiagnostics(debug) {
