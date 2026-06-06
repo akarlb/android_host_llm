@@ -7,6 +7,7 @@ import java.io.ByteArrayInputStream
 import java.io.OutputStreamWriter
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
+import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -44,8 +45,11 @@ class LocalHttpServer(
     private val promptBudgetManager = PromptBudgetManager()
     private val skillRepository = SkillRepository(appContext)
     private val toolRegistry = ToolRegistry(chatRepository, fileRepository)
+    private val securityMode = SecurityMode.fromServerMode(serverMode)
+    private val requestId = ThreadLocal<String>()
 
     override fun serve(session: IHTTPSession): Response {
+        requestId.set(newRequestId())
         if (session.method == Method.OPTIONS) return corsPreflightResponse()
 
         val path = normalizePath(session.uri.orEmpty())
@@ -79,6 +83,7 @@ class LocalHttpServer(
             session.method == Method.POST && path == "/auth/register" -> registerResponse(session)
             session.method == Method.POST && path == "/auth/login" -> loginResponse(session)
             session.method == Method.POST && path == "/auth/logout" -> logoutResponse(session)
+            session.method == Method.POST && path == "/auth/logout-all" -> logoutAllResponse(session)
             session.method == Method.GET && path == "/auth/session" -> sessionResponse(session)
             session.method == Method.GET && path == "/api/admin/status" -> adminStatusResponse(session)
             session.method == Method.GET && path == "/api/admin/users" -> adminUsersResponse(session)
@@ -109,12 +114,12 @@ class LocalHttpServer(
             session.method == Method.GET && chatId != null -> getChatResponse(session, chatId)
             session.method == Method.POST && messageChatId != null -> createMessageResponse(session, messageChatId)
             session.method == Method.DELETE && chatId != null -> deleteChatResponse(session, chatId)
-            session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse()
-            session.method == Method.GET && path == "/debug/perf" -> performanceResponse()
-            session.method == Method.GET && path == "/debug/perf/history" -> performanceHistoryResponse()
-            session.method == Method.GET && path == "/debug/config" -> configResponse()
-            session.method == Method.POST && path == "/debug/config" -> updateConfigResponse(session)
-            session.method == Method.POST && path == "/debug/benchmark" -> benchmarkResponse(session)
+            session.method == Method.GET && path == "/debug/routes" -> debugRoutesResponse(session)
+            session.method == Method.GET && path == "/debug/perf" -> debugResponse(session) { performanceResponse() }
+            session.method == Method.GET && path == "/debug/perf/history" -> debugResponse(session) { performanceHistoryResponse() }
+            session.method == Method.GET && path == "/debug/config" -> debugResponse(session) { configResponse() }
+            session.method == Method.POST && path == "/debug/config" -> debugResponse(session) { updateConfigResponse(session) }
+            session.method == Method.POST && path == "/debug/benchmark" -> debugResponse(session) { benchmarkResponse(session) }
             session.method == Method.POST && path == "/v1/conversation/reset" -> resetConversationResponse(session)
             session.method == Method.POST && path == "/v1/chat/completions" -> chatCompletionResponse(session)
             session.method == Method.POST && path == "/coding/v1/chat/completions" -> chatCompletionResponse(session, responseModeOverride = ResponseMode.CODING_CONCISE)
@@ -122,7 +127,7 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/v1/chat/completions" -> methodNotAllowedResponse()
             session.method == Method.GET && path == "/coding/v1/chat/completions" -> methodNotAllowedResponse()
             session.method == Method.GET && path == "/conversation/v1/chat/completions" -> methodNotAllowedResponse()
-            else -> jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
+            else -> errorResponse(Response.Status.NOT_FOUND, "not_found", "Not found")
         }
     }
 
@@ -208,7 +213,7 @@ class LocalHttpServer(
                 addHeader("Cache-Control", if (safeName.endsWith(".html")) "no-store" else "public, max-age=300")
             }
         } catch (_: Exception) {
-            jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
+            errorResponse(Response.Status.NOT_FOUND, "not_found", "Not found")
         }
     }
 
@@ -245,6 +250,7 @@ class LocalHttpServer(
                     .put("register", "POST /auth/register")
                     .put("login", "POST /auth/login")
                     .put("logout", "POST /auth/logout")
+                    .put("logoutAll", "POST /auth/logout-all")
                     .put("session", "GET /auth/session")
                     .put("chats", "GET/POST /api/chats")
                     .put("chatDetail", "GET/DELETE /api/chats/{chatId}")
@@ -273,12 +279,25 @@ class LocalHttpServer(
     }
 
     private fun healthResponse(): Response {
+        val storageWritable = runCatching {
+            val probe = java.io.File(appContext.filesDir, ".health-write-check")
+            probe.writeText("ok")
+            probe.delete()
+        }.getOrDefault(false)
+        val databaseAvailable = runCatching {
+            AppDatabase(appContext).readableDatabase.rawQuery("SELECT 1", emptyArray()).use { it.moveToFirst() }
+        }.getOrDefault(false)
         return jsonResponse(
             Response.Status.OK,
             JSONObject()
                 .put("status", "ok")
+                .put("appAlive", true)
+                .put("databaseAvailable", databaseAvailable)
                 .put("modelLoaded", liteRtLmManager.isLoaded())
+                .put("storageWritable", storageWritable)
+                .put("securityMode", securityMode.name)
                 .put("serverMode", serverMode)
+                .put("diagnostics", if (securityMode == SecurityMode.TRUSTED_LAN) "admin-required" else "local-dev-open")
         )
     }
 
@@ -300,12 +319,16 @@ class LocalHttpServer(
         )
     }
 
-    private fun debugRoutesResponse(): Response {
+    private fun debugRoutesResponse(session: IHTTPSession): Response {
+        if (securityMode == SecurityMode.TRUSTED_LAN && authRepository.requireAdmin(sessionTokenFromRequest(session)) == null) {
+            return errorResponse(Response.Status.UNAUTHORIZED, "admin_required", "Admin session required in TRUSTED_LAN mode")
+        }
         return jsonResponse(
             Response.Status.OK,
             JSONObject()
                 .put("status", "ok")
                 .put("routesEnabled", true)
+                .put("securityMode", securityMode.name)
                 .put("cors", true)
                 .put("privateNetworkAccess", true)
                 .put("modelsEndpoint", true)
@@ -364,6 +387,12 @@ class LocalHttpServer(
                 Response.Status.UNAUTHORIZED,
                 JSONObject().put("error", "Invalid credentials")
             )
+            is AuthResult.Throttled -> errorResponse(
+                Response.Status.TOO_MANY_REQUESTS,
+                "login_throttled",
+                "Too many failed login attempts. Try again later.",
+                JSONObject().put("retryAfterSeconds", result.retryAfterSeconds),
+            )
         }
     }
 
@@ -383,6 +412,12 @@ class LocalHttpServer(
                 Response.Status.UNAUTHORIZED,
                 JSONObject().put("error", "Invalid credentials")
             )
+            is AuthResult.Throttled -> errorResponse(
+                Response.Status.TOO_MANY_REQUESTS,
+                "login_throttled",
+                "Too many failed login attempts. Try again later.",
+                JSONObject().put("retryAfterSeconds", result.retryAfterSeconds),
+            )
         }
     }
 
@@ -397,6 +432,20 @@ class LocalHttpServer(
             JSONObject()
                 .put("status", "ok")
                 .put("message", "Logged out")
+        )
+    }
+
+    private fun logoutAllResponse(session: IHTTPSession): Response {
+        val token = sessionTokenFromRequest(session)
+        if (authRepository.requireUser(token) == null) {
+            return unauthorizedResponse()
+        }
+        authRepository.logoutAllForToken(token)
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("message", "Logged out all sessions for current user")
         )
     }
 
@@ -1551,17 +1600,17 @@ class LocalHttpServer(
         val user = authRepository.requireUser(sessionTokenFromRequest(session))
             ?: return unauthorizedResponse()
         if (user.role != UserRole.ADMIN) {
-            return jsonResponse(Response.Status.FORBIDDEN, JSONObject().put("error", "Forbidden"))
+            return errorResponse(Response.Status.FORBIDDEN, "forbidden", "Forbidden")
         }
         return block()
     }
 
     private fun unauthorizedResponse(): Response {
-        return jsonResponse(Response.Status.UNAUTHORIZED, JSONObject().put("error", "Unauthorized"))
+        return errorResponse(Response.Status.UNAUTHORIZED, "unauthorized", "Unauthorized")
     }
 
     private fun notFoundResponse(): Response {
-        return jsonResponse(Response.Status.NOT_FOUND, JSONObject().put("error", "Not found"))
+        return errorResponse(Response.Status.NOT_FOUND, "not_found", "Not found")
     }
 
     private fun chatJson(chat: ChatRecord): JSONObject {
@@ -1833,9 +1882,49 @@ class LocalHttpServer(
     }
 
     private fun jsonResponse(status: Response.Status, body: JSONObject): Response {
+        val id = currentRequestId()
+        if (body.has("error") && !body.has("requestId")) {
+            val message = body.optString("error", "Request failed")
+            body.put("requestId", id)
+            body.put(
+                "errorDetails",
+                JSONObject()
+                    .put("code", defaultErrorCode(status))
+                    .put("message", message)
+                    .put("requestId", id)
+            )
+        }
         return newFixedLengthResponse(status, "application/json", body.toString()).apply {
             addCorsHeaders()
         }
+    }
+
+    private fun errorResponse(
+        status: Response.Status,
+        code: String,
+        message: String,
+        details: JSONObject? = null,
+    ): Response {
+        val id = currentRequestId()
+        val error = JSONObject()
+            .put("code", code)
+            .put("message", message)
+            .put("requestId", id)
+        if (details != null) error.put("details", details)
+        return jsonResponse(
+            status,
+            JSONObject()
+                .put("error", message)
+                .put("requestId", id)
+                .put("errorDetails", error)
+        )
+    }
+
+    private fun debugResponse(session: IHTTPSession, block: () -> Response): Response {
+        if (securityMode == SecurityMode.TRUSTED_LAN && authRepository.requireAdmin(sessionTokenFromRequest(session)) == null) {
+            return errorResponse(Response.Status.UNAUTHORIZED, "admin_required", "Admin session required in TRUSTED_LAN mode")
+        }
+        return block()
     }
 
     private fun redirectResponse(location: String): Response {
@@ -1847,10 +1936,30 @@ class LocalHttpServer(
 
     private fun Response.addCorsHeaders() {
         addHeader("Access-Control-Allow-Origin", "*")
-        addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        addHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
         addHeader("Access-Control-Max-Age", "86400")
         addHeader("Access-Control-Allow-Private-Network", "true")
+        addHeader("X-Request-Id", currentRequestId())
+    }
+
+    private fun currentRequestId(): String = requestId.get() ?: "req-unknown"
+
+    private fun newRequestId(): String = "req-${UUID.randomUUID()}"
+
+    private fun defaultErrorCode(status: Response.Status): String {
+        return when (status) {
+            Response.Status.BAD_REQUEST -> "bad_request"
+            Response.Status.UNAUTHORIZED -> "unauthorized"
+            Response.Status.FORBIDDEN -> "forbidden"
+            Response.Status.NOT_FOUND -> "not_found"
+            Response.Status.METHOD_NOT_ALLOWED -> "method_not_allowed"
+            Response.Status.CONFLICT -> "conflict"
+            Response.Status.PAYLOAD_TOO_LARGE -> "payload_too_large"
+            Response.Status.SERVICE_UNAVAILABLE -> "service_unavailable"
+            Response.Status.INTERNAL_ERROR -> "internal_error"
+            else -> "request_failed"
+        }
     }
 
     private companion object {

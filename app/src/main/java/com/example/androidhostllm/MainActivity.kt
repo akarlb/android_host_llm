@@ -466,7 +466,7 @@ class MainActivity : Activity() {
         val port = currentPort()
         val lanMode = lanModeButton.isChecked
         val bindHost = if (lanMode) "0.0.0.0" else "127.0.0.1"
-        val mode = if (lanMode) "lan" else "localhost"
+        val mode = if (lanMode) SecurityMode.TRUSTED_LAN.name else SecurityMode.LOCAL_DEV.name
         val displayUrl = if (lanMode) {
             NetworkUtils.lanIpv4Candidates().firstOrNull()?.let { "http://$it:$port" } ?: "http://0.0.0.0:$port"
         } else "http://127.0.0.1:$port"

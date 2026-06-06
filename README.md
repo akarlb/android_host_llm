@@ -155,13 +155,31 @@ The app can generate and store a random local server API key using `SecureRandom
 
 No API key is required for `/health`, `/v1/models`, or `/v1/chat/completions` while no-auth mode is active. The local HTTP API also sends CORS and Chrome Private Network Access headers so browser-based clients can make cross-origin LAN requests.
 
-Health responses return only basic status such as:
+Health responses return tiered local status without secrets:
 
 ```json
-{"status":"ok","modelLoaded":true,"serverMode":"lan"}
+{"status":"ok","appAlive":true,"databaseAvailable":true,"modelLoaded":true,"storageWritable":true,"securityMode":"TRUSTED_LAN","serverMode":"TRUSTED_LAN"}
 ```
 
 If API-key enforcement is re-enabled in a future build, generation requests can authenticate with either `Authorization: Bearer <LOCAL_SERVER_KEY>` or `X-API-Key: <LOCAL_SERVER_KEY>`.
+
+## Security modes and request IDs
+
+The embedded server now reports an explicit security mode:
+
+- `LOCAL_DEV` for localhost-oriented development.
+- `TRUSTED_LAN` for LAN / Wi-Fi serving.
+
+`LOCAL_DEV` preserves MVP compatibility for local debugging. `TRUSTED_LAN` keeps app/admin APIs session-protected and requires an admin session for `/debug/*` diagnostics. OpenAI-compatible model routes remain open by default unless local API-key enforcement is enabled, so do not expose the server to the public internet.
+
+JSON error responses preserve the legacy top-level `error` string and add `requestId` plus structured `errorDetails`. Responses include `X-Request-Id` for correlation.
+
+Sessions have a 12-hour absolute lifetime and a 2-hour idle timeout. `POST /auth/logout` invalidates the current session, and `POST /auth/logout-all` invalidates all sessions for the current user. Login attempts are throttled after repeated failures for the same normalized username.
+
+Detailed references:
+
+- API contract: `docs/api/api_contract.md`
+- Route/auth matrix: `docs/security/route_auth_matrix.md`
 
 ## Local auth MVP
 
@@ -172,6 +190,7 @@ Auth routes:
 - `POST /auth/register` with `{"username":"alice","password":"password123"}`
 - `POST /auth/login`
 - `POST /auth/logout`
+- `POST /auth/logout-all`
 - `GET /auth/session`
 
 The first registered local user is assigned `ADMIN`; later users are assigned `USER`. Username uniqueness is case-insensitive after trimming. Authenticated app routes should use `Authorization: Bearer <SESSION_TOKEN>`. An HTTP-only `session` cookie is also set on successful register/login for browser clients.

@@ -70,3 +70,102 @@ Results:
 
 Next action:
 - Commit this state update and create codex/orchestration/phase1-api-security-foundation.
+
+## 2026-06-06T17:42:51+02:00
+
+Branch: codex/orchestration/phase1-api-security-foundation
+
+Phase: Phase 1
+
+Action taken:
+- Created and committed `docs/audits/current/phase1_preimplementation_audit.md`.
+- Implemented a first Phase 1 backend slice covering explicit security mode mapping, session absolute/idle timeout, failed-login backoff, logout-all-current-user, request ID headers, structured error details, debug route gating in `TRUSTED_LAN`, and tiered health fields.
+- Ran whitespace and script syntax checks.
+- Attempted the required APK compile gate.
+- Checked for an alternate Gradle executable after the compile command failed.
+- Stopped Phase 1 because APK compilation is a hard gate and Gradle is unavailable.
+
+Files changed:
+- app/src/main/java/com/example/androidhostllm/AuthModels.kt
+- app/src/main/java/com/example/androidhostllm/AuthRepository.kt
+- app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt
+- app/src/main/java/com/example/androidhostllm/MainActivity.kt
+- app/src/main/java/com/example/androidhostllm/SecurityMode.kt
+- docs/audits/current/phase1_preimplementation_audit.md
+- docs/agentic_orchestration/orchestration_state.md
+- docs/agentic_orchestration/orchestration_log.md
+- docs/agentic_orchestration/orchestration_blockers.md
+
+Checks run:
+- git diff --check
+- ./gradlew clean assembleDebug
+- command -v gradle || true
+- command -v java || true
+- java -version
+- find /home/akb -maxdepth 5 -type f -name gradle -perm -111
+- ls -la ~/.gradle/wrapper/dists
+- find ~/.gradle -maxdepth 4 -type f -name 'gradle-*.zip'
+- bash -n test_auth_foundation.sh
+- bash -n test_mvp_full_stack.sh
+- bash -n test_skills_tools_thinking.sh
+- bash -n test_chat_scoped_files_and_markdown.sh
+
+Results:
+- Passed: git diff --check.
+- Passed: bash syntax checks for the listed shell scripts.
+- Blocked: ./gradlew clean assembleDebug exited 127 because Gradle is not installed on PATH.
+- Java 17 is installed at /usr/bin/java.
+- No alternate Gradle executable was found under PATH, /home/akb, /opt/gradle*, /usr/local/gradle*, or ~/.gradle wrapper distributions.
+- APK was not compiled.
+
+Next action:
+- Install Gradle 8.9+ or provide GRADLE_CMD pointing to a valid Gradle executable, then rerun Phase 1 compile and continue from this phase branch.
+
+## 2026-06-06T17:55:09+02:00
+
+Branch: codex/orchestration/phase1-api-security-foundation
+
+Phase: Phase 1
+
+Action taken:
+- Recovered from the earlier Gradle path blocker by locating Gradle 8.9 at `/tmp/gradle-8.9/bin/gradle` and Android SDK at `/tmp/android-sdk`.
+- Re-ran the APK compile gate with explicit `ANDROID_HOME`, `ANDROID_SDK_ROOT`, and `GRADLE_CMD`.
+- Added the Phase 1 API contract and route/auth matrix.
+- Updated README security mode, health, request ID, session, logout-all, and backoff documentation.
+- Updated `test_auth_foundation.sh` to live-check request ID errors, tiered health fields, logout-all, and failed-login throttle behavior.
+- Ran preferred Gradle checks.
+
+Files changed:
+- README.md
+- test_auth_foundation.sh
+- docs/api/api_contract.md
+- docs/security/route_auth_matrix.md
+- docs/audits/current/phase1_api_security_foundation_handoff.md
+- docs/audits/current/phase1_completion_audit.md
+- docs/agentic_orchestration/orchestration_state.md
+- docs/agentic_orchestration/orchestration_log.md
+- docs/agentic_orchestration/orchestration_blockers.md
+
+Checks run:
+- git diff --check
+- bash -n test_auth_foundation.sh
+- bash -n test_mvp_full_stack.sh
+- bash -n test_skills_tools_thinking.sh
+- bash -n test_chat_scoped_files_and_markdown.sh
+- bash -n test_admin_ui.sh
+- bash -n test_chat_api.sh
+- bash -n test_web_ui_smoke.sh
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew lint
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew check
+
+Results:
+- APK compile passed.
+- Gradle test passed; no unit tests are currently defined.
+- Gradle lint passed.
+- Gradle check passed.
+- Live phone-server scripts were syntax-checked but not live-run because no running phone server/model-loaded environment exists.
+
+Next action:
+- Commit Phase 1 completion docs, run final phase branch checks, then merge Phase 1 into codex/orchestration-phases-1-7.

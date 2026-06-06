@@ -19,6 +19,7 @@ data class AuthSession(
     val id: String,
     val token: String,
     val user: AuthUser,
+    val expiresAtMs: Long,
 )
 
 enum class UserRole {
@@ -28,6 +29,7 @@ enum class UserRole {
 
 sealed class AuthResult {
     data class Success(val session: AuthSession) : AuthResult()
+    data class Throttled(val retryAfterSeconds: Long) : AuthResult()
     object InvalidFields : AuthResult()
     object DuplicateUsername : AuthResult()
     object InvalidCredentials : AuthResult()
