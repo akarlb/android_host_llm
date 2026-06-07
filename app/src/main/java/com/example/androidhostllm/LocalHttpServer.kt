@@ -1142,7 +1142,7 @@ class LocalHttpServer(
         val skill = skillRepository.getSkillBySlug(activeState.skillSlug) ?: return jsonResponse(Response.Status.BAD_REQUEST, JSONObject().put("error", "Skill is unavailable"))
         val userMessage = chatRepository.addMessage(chat.id, "user", content)
         val messages = chatRepository.listMessages(user.id, chat.id).orEmpty()
-        val conversationMode = ConversationMode.FRESH_PER_REQUEST
+        val conversationMode = liteRtLmManager.consumeRecoveryConversationMode(appPreferences.savedConversationMode())
         val responseMode = responseModeForSkill(skill, chat.profile)
         val promptPlan = buildAppPromptPlan(user.id, chat.id, fileIds, messages, userMessage, responseMode, retry = false, skill = skill, skillState = activeState)
             ?: return notFoundResponse()
@@ -1704,6 +1704,32 @@ class LocalHttpServer(
             )
     }
 
+    private fun canUseDirectStreaming(skill: SkillRecord, state: ChatSkillStateRecord, userContent: String): Boolean {
+        if (skill.strictOutput || state.thinkingEnabled) return false
+        return when (skill.toolUseMode) {
+            ToolUseMode.NONE -> true
+            ToolUseMode.OPTIONAL -> !looksLikeToolRequest(userContent)
+            ToolUseMode.REQUIRED -> false
+        }
+    }
+
+    private fun looksLikeToolRequest(text: String): Boolean {
+        val lower = text.lowercase(java.util.Locale.US)
+        return listOf(
+            "current date",
+            "current time",
+            "what time",
+            "what date",
+            "today's date",
+            "attached file",
+            "attached files",
+            "list files",
+            "search attached",
+            "search the file",
+            "markdown file",
+        ).any { lower.contains(it) }
+    }
+
 
     private fun generateAppReply(
         userId: String,
@@ -1989,6 +2015,23 @@ class LocalHttpServer(
                     writer.flush()
                 }
 
+                fun writeGenerationEvent() {
+                    generationJobs.get(generationId)?.let {
+                        writeEvent(JSONObject().put("generation", generationJobJson(it)).toString())
+                    }
+                }
+
+                fun failActiveJob(error: Throwable): GenerationJobRecord? {
+                    val status = if (error is GenerationTimeoutException) GenerationStatus.TIMED_OUT else GenerationStatus.FAILED
+                    val code = if (status == GenerationStatus.TIMED_OUT) "generation_timed_out" else "generation_failed"
+                    return generationJobs.finishIfStillActive(
+                        generationId,
+                        status,
+                        code,
+                        error.message ?: "Generation failed.",
+                    )
+                }
+
                 try {
                     if (!liteRtLmManager.isLoaded()) {
                         generationJobs.fail(generationId, IllegalStateException("Model is not loaded"))
@@ -1997,9 +2040,58 @@ class LocalHttpServer(
                         return@use
                     }
                     generationJobs.markRunning(generationId, streaming = true)
-                    writeEvent(JSONObject().put("generation", generationJobJson(generationJobs.get(generationId)!!)).toString())
+                    writeGenerationEvent()
                     writeEvent(JSONObject().put("context", contextJson(promptPlan.plan.contextMetadata)).toString())
                     writeEvent(JSONObject().put("skill", skillJson(promptPlan.skill, false)).toString())
+
+                    if (canUseDirectStreaming(promptPlan.skill, promptPlan.skillState, userMessage.content)) {
+                        val streamed = StringBuilder()
+                        val result = runBlocking {
+                            liteRtLmManager.generateStreaming(
+                                prompt = prompt,
+                                onChunk = { chunk: String ->
+                                    if (chunk.isNotEmpty()) {
+                                        streamed.append(chunk)
+                                        generationJobs.appendPartial(generationId, chunk)
+                                        writeEvent(JSONObject().put("content", chunk).toString())
+                                    }
+                                },
+                                conversationModeOverride = conversationMode,
+                                responseModeOverride = responseMode,
+                            )
+                        }
+                        result.fold(
+                            onSuccess = { raw ->
+                                updateContextState(chat.id, promptPlan.context)
+                                val parsed = parseThinking(raw)
+                                val finalText = parsed.finalText.ifBlank { streamed.toString().trim() }
+                                val assistantMessage = chatRepository.addMessage(chat.id, "assistant", finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
+                                generationJobs.complete(generationId, assistantMessage.id, finalText)
+                                writeEvent(JSONObject().put("message", messageJson(assistantMessage)).toString())
+                                writeGenerationEvent()
+                                writeEvent("[DONE]")
+                            },
+                            onFailure = { error ->
+                                liteRtLmManager.forceClearGeneration("app direct streaming generation failed")
+                                if (isLikelyClientDisconnect(error)) {
+                                    generationJobs.finishIfStillActive(
+                                        generationId,
+                                        GenerationStatus.CANCELLED,
+                                        "client_disconnected",
+                                        "Streaming client disconnected before generation completed.",
+                                    )
+                                } else {
+                                    failActiveJob(error)
+                                    writeEvent(appStreamingErrorJson(error).toString())
+                                    writeGenerationEvent()
+                                    writeEvent("[DONE]")
+                                }
+                            }
+                        )
+                        return@use
+                    }
+
+                    writeEvent(JSONObject().put("status", "tool_or_strict_mode_blocking").toString())
                     val result = generateAppReply(
                         userId = chat.userId,
                         chat = chat,
@@ -2024,9 +2116,9 @@ class LocalHttpServer(
                         },
                         onFailure = { error ->
                             liteRtLmManager.forceClearGeneration("app streaming generation failed")
-                            generationJobs.fail(generationId, error)
+                            failActiveJob(error)
                             writeEvent(appStreamingErrorJson(error).toString())
-                            writeEvent(JSONObject().put("generation", generationJobJson(generationJobs.get(generationId)!!)).toString())
+                            writeGenerationEvent()
                             writeEvent("[DONE]")
                         }
                     )

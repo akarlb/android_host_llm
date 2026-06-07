@@ -930,11 +930,11 @@ send_stream_probe() {
     return
   fi
 
-  local stream_file status_file err_file body http_code
+  local stream_file status_file err_file body http_code status_payload first_byte_seconds
   stream_file="${RAW_DIR}/message_stream_sse.txt"
   status_file="${RAW_DIR}/message_stream_sse.status"
   err_file="${RAW_DIR}/message_stream_sse.curl.err"
-  body='{"content":"Diagnostic streaming probe: reply with exactly one short sentence.","stream":true,"fileIds":[]}'
+  body='{"content":"Write five short numbered sentences about local Android inference.","stream":true,"fileIds":[]}'
 
   console "RUN: streaming SSE probe with timeout ${STREAM_TIMEOUT_SECONDS}s"
 
@@ -945,15 +945,18 @@ send_stream_probe() {
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $AUTH_TOKEN" \
     --data-binary "$body" \
-    -w "%{http_code}" \
+    -w "%{http_code} %{time_starttransfer}" \
     -o "$stream_file" \
     "$BASE_URL/api/chats/${CHAT_ID}/messages" > "$status_file" 2>"$err_file"
 
   local curl_status=$?
-  http_code="$(cat "$status_file" 2>/dev/null || true)"
+  status_payload="$(cat "$status_file" 2>/dev/null || true)"
+  http_code="${status_payload%% *}"
+  first_byte_seconds="${status_payload#* }"
 
   log_report "- Streaming probe curl exit: \`$curl_status\`"
   log_report "- Streaming probe HTTP status: \`$http_code\`"
+  log_report "- Streaming time to first response byte: \`${first_byte_seconds}s\`"
   log_report "- Streaming output: \`$stream_file\`"
   log_report "- Streaming stderr: \`$err_file\`"
   log_report ""
@@ -989,15 +992,37 @@ send_stream_probe() {
     warn "SSE stream did not include [DONE]"
   fi
 
-  if grep -Eq '^data: .*"content"' "$stream_file" 2>/dev/null; then
+  local content_events done_line first_content_line
+  content_events="$(grep -Ec '^data: \{"content"' "$stream_file" 2>/dev/null || true)"
+  done_line="$(grep -n '^data: \[DONE\]' "$stream_file" 2>/dev/null | head -n 1 | cut -d: -f1 || true)"
+  first_content_line="$(grep -n '^data: \{"content"' "$stream_file" 2>/dev/null | head -n 1 | cut -d: -f1 || true)"
+  log_report "- SSE content event count: \`${content_events}\`"
+  log_report "- First content event line: \`${first_content_line:-none}\`"
+  log_report "- DONE line: \`${done_line:-none}\`"
+
+  if [ "${content_events:-0}" -gt 0 ]; then
     pass "SSE stream included at least one content event"
   else
     warn "SSE stream did not include a visible content event"
   fi
 
+  if [ -n "$first_content_line" ] && [ -n "$done_line" ] && [ "$first_content_line" -lt "$done_line" ]; then
+    pass "SSE content arrived before [DONE]"
+  elif [ -n "$first_content_line" ]; then
+    warn "SSE content event order could not be confirmed before [DONE]"
+  fi
+
+  if [ "${content_events:-0}" -gt 1 ]; then
+    pass "SSE stream included multiple content events"
+  elif [ "${content_events:-0}" -eq 1 ]; then
+    warn "SSE stream included only one content event"
+  fi
+
   if grep -qi "Another generation is already active\|generation_active" "$stream_file" "$err_file" 2>/dev/null; then
     fail "Streaming probe confirmed active-generation conflict"
   fi
+
+  wait_for_health_inactive "health_after_stream_probe" "$HEALTH_WAIT_AFTER_TIMEOUT_SECONDS" || true
 }
 
 post_probe_generations() {
@@ -1079,6 +1104,22 @@ source_scan_generation_code() {
     cat "${RAW_DIR}/grep_generation_jobs.txt"
     printf '\n```\n'
   } >> "$REPORT"
+
+  subsection "Search: direct app streaming path"
+  grep -RIn "canUseDirectStreaming\|generateStreaming(\|appendPartial(generationId" app/src/main/java/com/example/androidhostllm/LocalHttpServer.kt 2>/dev/null \
+    > "${RAW_DIR}/grep_direct_streaming.txt" || true
+
+  {
+    printf '```text\n'
+    cat "${RAW_DIR}/grep_direct_streaming.txt"
+    printf '\n```\n'
+  } >> "$REPORT"
+
+  if grep -q "generateStreaming(" "${RAW_DIR}/grep_direct_streaming.txt" && grep -q "appendPartial(generationId" "${RAW_DIR}/grep_direct_streaming.txt"; then
+    pass "App streaming route includes direct generateStreaming path"
+  else
+    warn "Could not confirm direct app generateStreaming path by source scan"
+  fi
 }
 
 interpretation() {
