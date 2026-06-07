@@ -723,3 +723,33 @@ Results:
 
 Next action:
 - Wait for explicit user authorization before starting Phase 7 relay/network-agnostic architecture work.
+
+## 2026-06-07T15:00:06+02:00
+
+Branch: codex/hotfix-generation-active-lock
+
+Phase: Hotfix - generation active lock
+
+Action taken:
+- Audited the global generation-active lock sources.
+- Added stale active job expiry and structured generation diagnostics.
+- Added app-chat stream cleanup for disconnect/write failures.
+- Added admin global generation list and cancel routes.
+- Added `/health` and `/api/admin/status` generation summaries.
+- Added admin and chat UI recovery controls.
+- Updated `diagnose_generation_active.sh` for normalized `BASE_URL` and global generation probes.
+- Added focused `GenerationJobStore` JVM tests.
+
+Checks run so far:
+- bash -n diagnose_generation_active.sh
+- node --check app/src/main/assets/web/app.js
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test --no-daemon
+
+Results:
+- Script syntax passed.
+- Frontend JS syntax passed.
+- JVM tests passed after rerunning with `ANDROID_HOME` and `ANDROID_SDK_ROOT`.
+- Live phone/model diagnostics not run in this shell.
+
+Next action:
+- Run final static, APK compile, lint, and check gates, then merge only into `codex/orchestration-phases-1-7`.
