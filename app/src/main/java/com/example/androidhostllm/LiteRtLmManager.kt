@@ -268,13 +268,22 @@ class LiteRtLmManager(private val appContext: Context) {
 
     fun generationTimeoutSeconds(): Int = generationTimeoutSeconds
 
-    fun cancelCurrentGeneration(): Result<Unit> {
+    fun cancelCurrentGeneration(reason: String = "manual_cancel"): Result<Unit> {
         val job = currentGenerationJob
-        return if (job == null || !activeGeneration) {
-            Result.failure(IllegalStateException("No active generation to cancel"))
-        } else {
-            job.cancel()
-            Result.success(Unit)
+        return when {
+            job != null && activeGeneration -> {
+                job.cancel()
+                Result.success(Unit)
+            }
+            job == null && activeGeneration -> {
+                activeGeneration = false
+                currentGenerationJob = null
+                lastErrorShortMessage = "Recovered stale active generation flag: $reason"
+                Result.success(Unit)
+            }
+            else -> {
+                Result.failure(IllegalStateException("No active generation to cancel"))
+            }
         }
     }
 

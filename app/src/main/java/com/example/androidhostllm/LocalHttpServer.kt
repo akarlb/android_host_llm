@@ -4,6 +4,7 @@ import android.content.Context
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.io.OutputStreamWriter
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
@@ -25,6 +26,16 @@ private data class ParsedModelResponse(
     val rawModelText: String,
     val thinkingText: String?,
     val finalText: String,
+)
+
+private data class GenerationActiveSummary(
+    val jobStoreActive: Boolean,
+    val liteRtActive: Boolean,
+    val activeGenerationSource: String,
+    val activeCount: Int,
+    val jobStoreActiveCount: Int,
+    val expiredStaleCount: Int,
+    val activeJob: GenerationJobRecord?,
 )
 
 class LocalHttpServer(
@@ -65,6 +76,7 @@ class LocalHttpServer(
         val chatGenerationListId = chatGenerationListIdFromPath(path)
         val generationCancelId = generationCancelIdFromPath(path)
         val generationId = generationIdFromPath(path)
+        val adminGenerationCancelId = adminGenerationCancelIdFromPath(path)
         val adminSkillSlug = adminSkillSlugFromPath(path)
         val skillSlug = skillSlugFromPath(path)
         val chatFileAttachment = chatFileAttachmentFromPath(path)
@@ -95,6 +107,9 @@ class LocalHttpServer(
             session.method == Method.GET && path == "/api/admin/status" -> adminStatusResponse(session)
             session.method == Method.GET && path == "/api/admin/users" -> adminUsersResponse(session)
             session.method == Method.GET && path == "/api/admin/files" -> adminFilesResponse(session)
+            session.method == Method.GET && path == "/api/admin/generations" -> adminGenerationsResponse(session)
+            session.method == Method.POST && path == "/api/admin/generations/cancel-all-active" -> adminCancelAllGenerationsResponse(session)
+            session.method == Method.POST && adminGenerationCancelId != null -> adminCancelGenerationResponse(session, adminGenerationCancelId)
             session.method == Method.GET && path == "/api/admin/ops/export" -> adminOpsExportResponse(session)
             session.method == Method.GET && path == "/api/admin/ops/diagnostics" -> adminOpsDiagnosticsResponse(session)
             session.method == Method.GET && path == "/api/admin/ops/storage/scan" -> adminOpsStorageScanResponse(session)
@@ -218,6 +233,11 @@ class LocalHttpServer(
         return if (parts.size == 3 && parts[0] == "api" && parts[1] == "generations") parts[2] else null
     }
 
+    private fun adminGenerationCancelIdFromPath(path: String): String? {
+        val parts = path.split('/').filter { it.isNotBlank() }
+        return if (parts.size == 5 && parts[0] == "api" && parts[1] == "admin" && parts[2] == "generations" && parts[4] == "cancel") parts[3] else null
+    }
+
     private fun skillSlugFromPath(path: String): String? {
         val parts = path.split('/').filter { it.isNotBlank() }
         return if (parts.size == 3 && parts[0] == "api" && parts[1] == "skills") parts[2] else null
@@ -314,6 +334,8 @@ class LocalHttpServer(
                     .put("adminStatus", "GET /api/admin/status")
                     .put("adminUsers", "GET /api/admin/users")
                     .put("adminFiles", "GET /api/admin/files")
+                    .put("adminGenerations", "GET /api/admin/generations")
+                    .put("adminCancelAllGenerations", "POST /api/admin/generations/cancel-all-active")
                     .put("adminOpsExport", "GET /api/admin/ops/export")
                     .put("adminOpsDiagnostics", "GET /api/admin/ops/diagnostics")
                     .put("adminOpsStorageScan", "GET /api/admin/ops/storage/scan")
@@ -343,11 +365,14 @@ class LocalHttpServer(
         val databaseAvailable = runCatching {
             AppDatabase(appContext).readableDatabase.rawQuery("SELECT 1", emptyArray()).use { it.moveToFirst() }
         }.getOrDefault(false)
+        val generationSummary = generationActiveSummary()
         return JSONObject()
             .put("status", "ok")
             .put("appAlive", true)
             .put("databaseAvailable", databaseAvailable)
             .put("modelLoaded", liteRtLmManager.isLoaded())
+            .put("activeGeneration", generationSummary.jobStoreActive || generationSummary.liteRtActive)
+            .put("generation", generationSummaryJson(generationSummary, includeActiveJob = false))
             .put("storageWritable", storageWritable)
             .put("securityMode", securityMode.name)
             .put("serverMode", serverMode)
@@ -403,6 +428,8 @@ class LocalHttpServer(
                 .put("adminStatusEndpoint", "GET /api/admin/status")
                 .put("adminUsersEndpoint", "GET /api/admin/users")
                 .put("adminFilesEndpoint", "GET /api/admin/files")
+                .put("adminGenerationsEndpoint", "GET /api/admin/generations")
+                .put("adminCancelAllGenerationsEndpoint", "POST /api/admin/generations/cancel-all-active")
                 .put("streamingCompat", true)
                 .put("streamingIncremental", true)
                 .put("resetConversationEndpoint", "POST /v1/conversation/reset")
@@ -553,6 +580,7 @@ class LocalHttpServer(
             val files = fileRepository.listAdminFileOverviews()
             val users = authRepository.listAdminUserOverviews()
             val perf = liteRtLmManager.performanceSnapshot()
+            val generationSummary = generationActiveSummary(perf.activeGeneration)
             jsonResponse(
                 Response.Status.OK,
                 JSONObject()
@@ -572,7 +600,8 @@ class LocalHttpServer(
                     .put("speculativeDecodingEnabled", perf.speculativeDecodingEnabled)
                     .put("speculativeDecodingAvailable", perf.speculativeDecodingAvailable)
                     .put("speculativeDecodingError", perf.speculativeDecodingError ?: JSONObject.NULL)
-                    .put("activeGeneration", perf.activeGeneration)
+                    .put("activeGeneration", generationSummary.jobStoreActive || generationSummary.liteRtActive)
+                    .put("generation", generationSummaryJson(generationSummary, includeActiveJob = true))
                     .put(
                         "debug",
                         JSONObject()
@@ -581,6 +610,7 @@ class LocalHttpServer(
                             .put("config", "/debug/config")
                             .put("routes", "/debug/routes")
                             .put("health", "/health")
+                            .put("generations", "/api/admin/generations")
                     )
             )
         }
@@ -600,6 +630,54 @@ class LocalHttpServer(
             fileRepository.listAdminFileOverviews().forEach { files.put(adminFileJson(it)) }
             jsonResponse(Response.Status.OK, JSONObject().put("files", files))
         }
+    }
+
+    private fun adminGenerationsResponse(session: IHTTPSession): Response = withAdmin(session) {
+        val summary = generationActiveSummary()
+        val generations = JSONArray()
+        generationJobs.recentAll().forEach { generations.put(generationJobJson(it, admin = true)) }
+        jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("generation", generationSummaryJson(summary, includeActiveJob = true))
+                .put("generations", generations)
+        )
+    }
+
+    private fun adminCancelAllGenerationsResponse(session: IHTTPSession): Response = withAdmin(session) {
+        val cancelled = generationJobs.cancelAllActive("Cancelled by admin")
+        val liteRtCancel = liteRtLmManager.cancelCurrentGeneration("admin_cancel_all_active")
+        val summary = generationActiveSummary()
+        jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("status", "ok")
+                .put("cancelledCount", cancelled.size)
+                .put("liteRtCancelAttempted", true)
+                .put("liteRtCancelSucceeded", liteRtCancel.isSuccess)
+                .put("liteRtCancelMessage", liteRtCancel.exceptionOrNull()?.message ?: JSONObject.NULL)
+                .put("generation", generationSummaryJson(summary, includeActiveJob = true))
+                .put("cancelled", JSONArray().also { array -> cancelled.forEach { array.put(generationJobJson(it, admin = true)) } })
+        )
+    }
+
+    private fun adminCancelGenerationResponse(session: IHTTPSession, generationId: String): Response = withAdmin(session) {
+        val job = generationJobs.get(generationId) ?: return@withAdmin notFoundResponse()
+        val liteRtCancel = if (job.isActive) liteRtLmManager.cancelCurrentGeneration("admin_cancel_generation") else Result.success(Unit)
+        val cancelled = if (job.isActive) {
+            generationJobs.cancel(generationId, "Cancelled by admin") ?: job
+        } else {
+            job
+        }
+        jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("generation", generationJobJson(cancelled, admin = true))
+                .put("liteRtCancelAttempted", job.isActive)
+                .put("liteRtCancelSucceeded", liteRtCancel.isSuccess)
+                .put("liteRtCancelMessage", liteRtCancel.exceptionOrNull()?.message ?: JSONObject.NULL)
+                .put("summary", generationSummaryJson(generationActiveSummary(), includeActiveJob = true))
+        )
     }
 
     private fun adminOpsExportResponse(session: IHTTPSession): Response = withAdmin(session) {
@@ -945,7 +1023,13 @@ class LocalHttpServer(
         chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
         val array = JSONArray()
         generationJobs.recentForChat(chatId).forEach { array.put(generationJobJson(it)) }
-        return jsonResponse(Response.Status.OK, JSONObject().put("generations", array))
+        return jsonResponse(
+            Response.Status.OK,
+            JSONObject()
+                .put("generations", array)
+                .put("activeGeneration", generationJobs.activeForChat(chatId)?.let { generationJobJson(it) } ?: JSONObject.NULL)
+                .put("summary", generationSummaryJson(generationActiveSummary(), includeActiveJob = false))
+        )
     }
 
     private fun getGenerationResponse(session: IHTTPSession, generationId: String): Response {
@@ -959,7 +1043,7 @@ class LocalHttpServer(
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val job = generationJobs.get(generationId) ?: return notFoundResponse()
         if (job.userId != user.id) return notFoundResponse()
-        liteRtLmManager.cancelCurrentGeneration()
+        liteRtLmManager.cancelCurrentGeneration("user_cancel_generation")
         val cancelled = generationJobs.cancel(generationId) ?: job
         return jsonResponse(Response.Status.OK, JSONObject().put("generation", generationJobJson(cancelled)))
     }
@@ -968,7 +1052,7 @@ class LocalHttpServer(
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
         val job = generationJobs.activeForChat(chatId) ?: return errorResponse(Response.Status.CONFLICT, "no_active_generation", "No active generation for this chat")
-        liteRtLmManager.cancelCurrentGeneration()
+        liteRtLmManager.cancelCurrentGeneration("user_cancel_chat_generation")
         val cancelled = generationJobs.cancel(job.id) ?: job
         return jsonResponse(Response.Status.OK, JSONObject().put("generation", generationJobJson(cancelled)))
     }
@@ -976,8 +1060,9 @@ class LocalHttpServer(
     private fun retryChatGenerationResponse(session: IHTTPSession, chatId: String): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
-        if (generationJobs.activeAny() != null || liteRtLmManager.performanceSnapshot().activeGeneration) {
-            return errorResponse(Response.Status.CONFLICT, "generation_active", "Another generation is already active")
+        val generationSummary = generationActiveSummary()
+        if (generationSummary.jobStoreActive || generationSummary.liteRtActive) {
+            return activeGenerationConflictResponse(generationSummary)
         }
         val messages = chatRepository.listMessages(user.id, chat.id).orEmpty()
         val lastUser = messages.lastOrNull { it.role == "user" }
@@ -1010,8 +1095,9 @@ class LocalHttpServer(
     private fun createMessageResponse(session: IHTTPSession, chatId: String): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
-        if (generationJobs.activeAny() != null || liteRtLmManager.performanceSnapshot().activeGeneration) {
-            return errorResponse(Response.Status.CONFLICT, "generation_active", "Another generation is already active")
+        val generationSummary = generationActiveSummary()
+        if (generationSummary.jobStoreActive || generationSummary.liteRtActive) {
+            return activeGenerationConflictResponse(generationSummary)
         }
         val requestJson = readJsonRequest(session) ?: return jsonResponse(
             Response.Status.BAD_REQUEST,
@@ -1369,7 +1455,7 @@ class LocalHttpServer(
                         }
                     )
                 } catch (_: Throwable) {
-                    // The client may have disconnected; closing the pipe stops the streaming response.
+                    // The client may have disconnected; LiteRtLmManager clears its active flag when generation unwinds.
                 }
             }
         }.apply {
@@ -1901,8 +1987,22 @@ class LocalHttpServer(
                             writeEvent("[DONE]")
                         }
                     )
-                } catch (_: Throwable) {
-                    // The client may have disconnected; closing the pipe stops the streaming response.
+                } catch (error: Throwable) {
+                    if (isLikelyClientDisconnect(error)) {
+                        generationJobs.finishIfStillActive(
+                            generationId,
+                            GenerationStatus.CANCELLED,
+                            "client_disconnected",
+                            "Streaming client disconnected before generation completed.",
+                        )
+                    } else {
+                        generationJobs.finishIfStillActive(
+                            generationId,
+                            GenerationStatus.FAILED,
+                            "streaming_response_failed",
+                            error.message ?: "Streaming response failed.",
+                        )
+                    }
                 }
             }
         }.apply {
@@ -2077,19 +2177,83 @@ class LocalHttpServer(
             .put("createdAtMs", log.createdAtMs)
     }
 
-    private fun generationJobJson(job: GenerationJobRecord): JSONObject {
-        return JSONObject()
+    private fun generationActiveSummary(liteRtActiveOverride: Boolean? = null): GenerationActiveSummary {
+        val jobSummary = generationJobs.activeSummary()
+        val liteRtActive = liteRtActiveOverride ?: liteRtLmManager.performanceSnapshot().activeGeneration
+        val jobStoreActive = jobSummary.activeCount > 0
+        val source = when {
+            jobStoreActive && liteRtActive -> "both"
+            jobStoreActive -> "jobStore"
+            liteRtActive -> "liteRtManager"
+            else -> "none"
+        }
+        return GenerationActiveSummary(
+            jobStoreActive = jobStoreActive,
+            liteRtActive = liteRtActive,
+            activeGenerationSource = source,
+            activeCount = jobSummary.activeCount + if (liteRtActive) 1 else 0,
+            jobStoreActiveCount = jobSummary.activeCount,
+            expiredStaleCount = jobSummary.expiredStaleCount,
+            activeJob = jobSummary.activeJob,
+        )
+    }
+
+    private fun generationSummaryJson(summary: GenerationActiveSummary, includeActiveJob: Boolean): JSONObject {
+        val json = JSONObject()
+            .put("jobStoreActive", summary.jobStoreActive)
+            .put("liteRtActive", summary.liteRtActive)
+            .put("activeGenerationSource", summary.activeGenerationSource)
+            .put("activeCount", summary.activeCount)
+            .put("jobStoreActiveCount", summary.jobStoreActiveCount)
+            .put("expiredStaleCount", summary.expiredStaleCount)
+        if (includeActiveJob) {
+            json.put("activeJob", summary.activeJob?.let { generationJobJson(it, admin = true) } ?: JSONObject.NULL)
+        }
+        return json
+    }
+
+    private fun activeGenerationConflictResponse(summary: GenerationActiveSummary): Response {
+        return errorResponse(
+            Response.Status.CONFLICT,
+            "generation_active",
+            "Another generation is already active",
+            generationSummaryJson(summary, includeActiveJob = false),
+        )
+    }
+
+    private fun generationJobJson(job: GenerationJobRecord, admin: Boolean = false): JSONObject {
+        val now = System.currentTimeMillis()
+        val activeStartedAt = job.startedAtMs ?: job.createdAtMs
+        val json = JSONObject()
             .put("id", job.id)
             .put("chatId", job.chatId)
-            .put("userId", job.userId)
+            .put(if (admin) "userRef" else "userId", if (admin) redactedId(job.userId) else job.userId)
             .put("userMessageId", job.userMessageId)
             .put("assistantMessageId", job.assistantMessageId ?: JSONObject.NULL)
             .put("status", job.status.name.lowercase())
             .put("createdAtMs", job.createdAtMs)
+            .put("updatedAtMs", job.updatedAtMs)
             .put("startedAtMs", job.startedAtMs ?: JSONObject.NULL)
             .put("completedAtMs", job.completedAtMs ?: JSONObject.NULL)
+            .put("ageMs", (now - job.createdAtMs).coerceAtLeast(0))
+            .put("activeAgeMs", if (job.isActive) (now - activeStartedAt).coerceAtLeast(0) else JSONObject.NULL)
+            .put("isActive", job.isActive)
+            .put("errorCode", job.errorCode ?: JSONObject.NULL)
+            .put("errorMessage", job.errorMessage ?: job.error ?: JSONObject.NULL)
             .put("error", job.error ?: JSONObject.NULL)
-            .put("partialOutput", job.partialOutput)
+        if (!admin) json.put("partialOutput", job.partialOutput)
+        return json
+    }
+
+    private fun redactedId(value: String): String {
+        if (value.length <= 8) return "redacted"
+        return "${value.take(4)}...${value.takeLast(4)}"
+    }
+
+    private fun isLikelyClientDisconnect(error: Throwable): Boolean {
+        if (error is IOException) return true
+        val message = error.message.orEmpty().lowercase()
+        return listOf("broken pipe", "pipe closed", "stream closed", "connection reset", "closed").any { message.contains(it) }
     }
 
     private fun sanitizeJsonPreview(value: String): String {
