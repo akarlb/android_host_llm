@@ -157,13 +157,13 @@ class GenerationJobStore(
 
     @Synchronized
     fun get(id: String): GenerationJobRecord? {
-        expireStaleActiveLocked(clock())
+        expireStaleActiveLocked(clock(), activeTimeoutMs)
         return jobs[id]
     }
 
     @Synchronized
     fun activeForChat(chatId: String): GenerationJobRecord? {
-        expireStaleActiveLocked(clock())
+        expireStaleActiveLocked(clock(), activeTimeoutMs)
         return jobs.values.lastOrNull {
             it.chatId == chatId && it.isActive
         }
@@ -171,25 +171,25 @@ class GenerationJobStore(
 
     @Synchronized
     fun activeAny(): GenerationJobRecord? {
-        expireStaleActiveLocked(clock())
+        expireStaleActiveLocked(clock(), activeTimeoutMs)
         return jobs.values.lastOrNull { it.isActive }
     }
 
     @Synchronized
     fun recentForChat(chatId: String): List<GenerationJobRecord> {
-        expireStaleActiveLocked(clock())
+        expireStaleActiveLocked(clock(), activeTimeoutMs)
         return jobs.values.filter { it.chatId == chatId }.takeLast(50).reversed()
     }
 
     @Synchronized
     fun recentAll(limit: Int = 100): List<GenerationJobRecord> {
-        expireStaleActiveLocked(clock())
+        expireStaleActiveLocked(clock(), activeTimeoutMs)
         return jobs.values.toList().takeLast(limit.coerceIn(1, 300)).reversed()
     }
 
     @Synchronized
     fun activeSummary(): GenerationJobSummary {
-        val expired = expireStaleActiveLocked(clock())
+        val expired = expireStaleActiveLocked(clock(), activeTimeoutMs)
         val activeJobs = jobs.values.filter { it.isActive }
         return GenerationJobSummary(
             activeCount = activeJobs.size,
@@ -200,7 +200,7 @@ class GenerationJobStore(
 
     @Synchronized
     fun cancelAllActive(message: String = "Cancelled by admin"): List<GenerationJobRecord> {
-        expireStaleActiveLocked(clock())
+        expireStaleActiveLocked(clock(), activeTimeoutMs)
         val now = clock()
         val cancelled = mutableListOf<GenerationJobRecord>()
         jobs.keys.toList().forEach { id ->
@@ -221,7 +221,7 @@ class GenerationJobStore(
     }
 
     @Synchronized
-    fun cleanupStaleActive(): Int = expireStaleActiveLocked(clock())
+    fun cleanupStaleActive(timeoutMs: Long = activeTimeoutMs): Int = expireStaleActiveLocked(clock(), timeoutMs)
 
     private fun update(id: String, block: (GenerationJobRecord) -> GenerationJobRecord): GenerationJobRecord? {
         val current = jobs[id] ?: return null
@@ -237,13 +237,13 @@ class GenerationJobStore(
         }
     }
 
-    private fun expireStaleActiveLocked(now: Long): Int {
+    private fun expireStaleActiveLocked(now: Long, timeoutMs: Long): Int {
         var expired = 0
         jobs.keys.toList().forEach { id ->
             val job = jobs[id] ?: return@forEach
             if (!job.isActive) return@forEach
             val activeStartedAt = job.startedAtMs ?: job.createdAtMs
-            if (now - activeStartedAt <= activeTimeoutMs) return@forEach
+            if (now - activeStartedAt <= timeoutMs) return@forEach
             jobs[id] = job.copy(
                 status = GenerationStatus.TIMED_OUT,
                 updatedAtMs = now,

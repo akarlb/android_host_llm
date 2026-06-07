@@ -16,6 +16,7 @@ set -uo pipefail
 #   RUN_API=0 bash diagnose_generation_active.sh
 #   AUTH_TOKEN="..." bash diagnose_generation_active.sh
 #   CANCEL_ACTIVE=1 bash diagnose_generation_active.sh
+#   GENERATION_STUCK_RECOVERY_TEST=1 SHORT_TIMEOUT_PROBE=1 bash diagnose_generation_active.sh
 #
 # Defaults:
 #   BASE_URL=http://127.0.0.1:8080
@@ -24,6 +25,8 @@ set -uo pipefail
 #   RUN_STATIC=1
 #   RUN_API=1
 #   CANCEL_ACTIVE=0
+#   GENERATION_STUCK_RECOVERY_TEST=1
+#   SHORT_TIMEOUT_PROBE=0
 #
 # Notes:
 #   - This script does not require an Android emulator.
@@ -39,11 +42,18 @@ RUN_COMPILE="${RUN_COMPILE:-1}"
 RUN_STATIC="${RUN_STATIC:-1}"
 RUN_API="${RUN_API:-1}"
 CANCEL_ACTIVE="${CANCEL_ACTIVE:-0}"
+GENERATION_STUCK_RECOVERY_TEST="${GENERATION_STUCK_RECOVERY_TEST:-1}"
+SHORT_TIMEOUT_PROBE="${SHORT_TIMEOUT_PROBE:-0}"
+SHORT_TIMEOUT_SECONDS="${SHORT_TIMEOUT_SECONDS:-2}"
+POST_TIMEOUT_GRACE_SECONDS="${POST_TIMEOUT_GRACE_SECONDS:-8}"
 AUTH_TOKEN="${AUTH_TOKEN:-}"
 DIAG_USERNAME="${DIAG_USERNAME:-diag_user_$(date +%s)}"
 DIAG_PASSWORD="${DIAG_PASSWORD:-diag-password-12345}"
 CHAT_ID="${CHAT_ID:-}"
 STREAM_TIMEOUT_SECONDS="${STREAM_TIMEOUT_SECONDS:-75}"
+NON_STREAM_TIMEOUT_SECONDS="${NON_STREAM_TIMEOUT_SECONDS:-$STREAM_TIMEOUT_SECONDS}"
+HEALTH_WAIT_AFTER_TIMEOUT_SECONDS="${HEALTH_WAIT_AFTER_TIMEOUT_SECONDS:-120}"
+HEALTH_POLL_INTERVAL_SECONDS="${HEALTH_POLL_INTERVAL_SECONDS:-3}"
 CURL_TIMEOUT_SECONDS="${CURL_TIMEOUT_SECONDS:-20}"
 
 STAMP="$(date -u +"%Y%m%dT%H%M%SZ")"
@@ -57,6 +67,7 @@ PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
+GENERATION_PROBE_ACTIVE_AFTER_NON_STREAM=0
 
 log_report() {
   printf '%s\n' "$*" >> "$REPORT"
@@ -442,6 +453,76 @@ probe_health() {
   return 0
 }
 
+assert_health_inactive() {
+  local name="${1:-health_assert}"
+  local result curl_status rest http_code file active_generation active_source job_store_active litert_active active_count
+  result="$(json_get "/health" "$name")"
+  curl_status="${result%%:*}"
+  rest="${result#*:}"
+  http_code="${rest%%:*}"
+  file="${rest#*:}"
+
+  log_report "- Health assertion ${name}: HTTP \`${http_code}\`, raw: \`${file}\`"
+  json_pretty_to_report "$file"
+
+  if [ "$curl_status" != "0" ] || [ "$http_code" != "200" ]; then
+    warn "Could not assert /health inactive for ${name}"
+    return 1
+  fi
+
+  active_generation="$(json_extract "$file" 'obj.get("activeGeneration", obj.get("generation", {}).get("active", ""))')"
+  active_source="$(json_extract "$file" 'obj.get("generation", {}).get("activeGenerationSource", "")')"
+  job_store_active="$(json_extract "$file" 'obj.get("generation", {}).get("jobStoreActive", "")')"
+  litert_active="$(json_extract "$file" 'obj.get("generation", {}).get("liteRtActive", "")')"
+  active_count="$(json_extract "$file" 'obj.get("generation", {}).get("activeCount", "")')"
+
+  log_report "- Health activeGeneration: \`${active_generation}\`"
+  log_report "- Health active source: \`${active_source}\`"
+  log_report "- Health jobStoreActive: \`${job_store_active}\`"
+  log_report "- Health liteRtActive: \`${litert_active}\`"
+  log_report "- Health activeCount: \`${active_count}\`"
+
+  if [ "$active_generation" = "False" ] || [ "$active_generation" = "false" ] || [ "$active_source" = "none" ]; then
+    pass "/health reports no active generation (${name})"
+  else
+    fail "/health still reports active generation (${name})"
+  fi
+}
+
+wait_for_health_inactive() {
+  local name="${1:-health_wait}"
+  local max_wait="${2:-$HEALTH_WAIT_AFTER_TIMEOUT_SECONDS}"
+  local deadline=$((SECONDS + max_wait))
+  local attempt=0
+
+  while [ "$SECONDS" -le "$deadline" ]; do
+    local result curl_status rest http_code file active_generation active_source
+    attempt=$((attempt + 1))
+    result="$(json_get "/health" "${name}_${attempt}")"
+    curl_status="${result%%:*}"
+    rest="${result#*:}"
+    http_code="${rest%%:*}"
+    file="${rest#*:}"
+
+    log_report "- Health wait ${name} attempt ${attempt}: HTTP \`${http_code}\`, raw: \`${file}\`"
+    if [ "$curl_status" = "0" ] && [ "$http_code" = "200" ]; then
+      active_generation="$(json_extract "$file" 'obj.get("activeGeneration", obj.get("generation", {}).get("active", ""))')"
+      active_source="$(json_extract "$file" 'obj.get("generation", {}).get("activeGenerationSource", "")')"
+      log_report "  - activeGeneration: \`${active_generation}\`"
+      log_report "  - active source: \`${active_source}\`"
+      if [ "$active_generation" = "False" ] || [ "$active_generation" = "false" ] || [ "$active_source" = "none" ]; then
+        pass "/health reports no active generation after wait (${name})"
+        return 0
+      fi
+    fi
+
+    sleep "$HEALTH_POLL_INTERVAL_SECONDS"
+  done
+
+  warn "Generation still running after ${max_wait}s wait (${name}); not treating this as stuck without active-age evidence"
+  return 1
+}
+
 obtain_auth() {
   subsection "Authentication"
 
@@ -731,15 +812,31 @@ send_non_stream_probe() {
     return
   fi
 
-  local body result curl_status rest http_code file error_code error_message
+  local body curl_status http_code file error_code error_message out_file status_file err_file
   body='{"content":"Diagnostic probe: reply with exactly one short sentence.","stream":false,"fileIds":[]}'
-  result="$(json_post "/api/chats/${CHAT_ID}/messages" "$body" "message_non_stream" "$AUTH_TOKEN")"
-  curl_status="${result%%:*}"
-  rest="${result#*:}"
-  http_code="${rest%%:*}"
-  file="${rest#*:}"
+  out_file="${RAW_DIR}/message_non_stream.json"
+  status_file="${RAW_DIR}/message_non_stream.status"
+  err_file="${RAW_DIR}/message_non_stream.curl.err"
+
+  console "RUN: non-streaming message probe with curl max-time ${NON_STREAM_TIMEOUT_SECONDS}s"
+
+  curl -sS --max-time "$NON_STREAM_TIMEOUT_SECONDS" \
+    -X POST \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $AUTH_TOKEN" \
+    --data-binary "$body" \
+    -w "%{http_code}" \
+    -o "$out_file" \
+    "$BASE_URL/api/chats/${CHAT_ID}/messages" > "$status_file" 2>"$err_file"
+
+  curl_status=$?
+  http_code="$(cat "$status_file" 2>/dev/null || true)"
+  file="$out_file"
 
   log_report "- Non-stream message: HTTP \`$http_code\`, raw: \`$file\`"
+  log_report "- Non-stream curl exit: \`$curl_status\`"
+  log_report "- Non-stream stderr: \`${err_file}\`"
   json_pretty_to_report "$file"
 
   error_code="$(json_extract "$file" 'obj.get("error", {}).get("code", obj.get("errorCode", "")) if isinstance(obj.get("error", ""), dict) else ""')"
@@ -747,6 +844,11 @@ send_non_stream_probe() {
 
   if [ "$http_code" = "200" ]; then
     pass "Non-streaming diagnostic message returned 200"
+  elif [ "$curl_status" = "28" ] || [ "$curl_status" = "124" ] || [ "$http_code" = "000" ] || [ -z "$http_code" ]; then
+    warn "Non-streaming diagnostic message did not complete within ${NON_STREAM_TIMEOUT_SECONDS}s; waiting for generation to finish before continuing"
+    if ! wait_for_health_inactive "health_after_non_stream_timeout" "$HEALTH_WAIT_AFTER_TIMEOUT_SECONDS"; then
+      GENERATION_PROBE_ACTIVE_AFTER_NON_STREAM=1
+    fi
   elif [ "$http_code" = "409" ]; then
     fail "Non-streaming diagnostic message returned 409 conflict"
     log_report "- Error code: \`$error_code\`"
@@ -761,8 +863,67 @@ send_non_stream_probe() {
   fi
 }
 
+send_short_timeout_probe() {
+  subsection "Short-timeout stuck recovery probe"
+
+  if [ "$GENERATION_STUCK_RECOVERY_TEST" != "1" ] || [ "$SHORT_TIMEOUT_PROBE" != "1" ]; then
+    skip "GENERATION_STUCK_RECOVERY_TEST or SHORT_TIMEOUT_PROBE disabled"
+    return
+  fi
+
+  if [ -z "$CHAT_ID" ]; then
+    skip "No CHAT_ID available"
+    return
+  fi
+
+  local out_file status_file err_file body curl_status http_code
+  out_file="${RAW_DIR}/message_short_timeout.json"
+  status_file="${RAW_DIR}/message_short_timeout.status"
+  err_file="${RAW_DIR}/message_short_timeout.curl.err"
+  body='{"content":"Diagnostic timeout probe: wait briefly, then reply with one short sentence.","stream":false,"fileIds":[]}'
+
+  console "RUN: short-timeout non-streaming probe with curl max-time ${SHORT_TIMEOUT_SECONDS}s"
+
+  curl -sS --max-time "$SHORT_TIMEOUT_SECONDS" \
+    -X POST \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $AUTH_TOKEN" \
+    --data-binary "$body" \
+    -w "%{http_code}" \
+    -o "$out_file" \
+    "$BASE_URL/api/chats/${CHAT_ID}/messages" > "$status_file" 2>"$err_file"
+
+  curl_status=$?
+  http_code="$(cat "$status_file" 2>/dev/null || true)"
+
+  log_report "- Short-timeout curl exit: \`${curl_status}\`"
+  log_report "- Short-timeout HTTP status: \`${http_code}\`"
+  log_report "- Short-timeout output: \`${out_file}\`"
+  log_report "- Short-timeout stderr: \`${err_file}\`"
+  json_pretty_to_report "$out_file"
+
+  if [ "$curl_status" = "28" ] || [ "$curl_status" = "124" ] || [ "$http_code" = "000" ] || [ -z "$http_code" ]; then
+    pass "Short-timeout probe simulated client timeout/disconnect"
+  elif [ "$http_code" = "200" ]; then
+    pass "Short-timeout probe completed before client timeout"
+  elif [ "$http_code" = "409" ]; then
+    fail "Short-timeout probe returned 409 generation_active before recovery test"
+  else
+    warn "Short-timeout probe returned HTTP ${http_code} with curl exit ${curl_status}"
+  fi
+
+  sleep "$POST_TIMEOUT_GRACE_SECONDS"
+  assert_health_inactive "health_after_short_timeout" || true
+}
+
 send_stream_probe() {
   subsection "Streaming/SSE message probe"
+
+  if [ "$GENERATION_PROBE_ACTIVE_AFTER_NON_STREAM" = "1" ]; then
+    skip "Skipping streaming probe because previous non-stream generation is still running"
+    return
+  fi
 
   if [ -z "$CHAT_ID" ]; then
     skip "No CHAT_ID available"
@@ -822,6 +983,8 @@ send_stream_probe() {
 
   if grep -q "data: \[DONE\]" "$stream_file" 2>/dev/null; then
     pass "SSE stream included [DONE]"
+  elif grep -qi '"error"\|"code"' "$stream_file" 2>/dev/null; then
+    pass "SSE stream included explicit error completion"
   else
     warn "SSE stream did not include [DONE]"
   fi
@@ -866,6 +1029,11 @@ post_probe_generations() {
   else
     warn "Could not list chat generations after probes; HTTP $http_code"
   fi
+}
+
+probe_admin_generations_after() {
+  subsection "Admin global generations after probes"
+  probe_admin_generations
 }
 
 source_scan_generation_code() {
@@ -966,9 +1134,12 @@ main() {
         create_or_use_chat
         list_chat_generations
         cancel_chat_generation_if_requested
+        send_short_timeout_probe
         send_non_stream_probe
         send_stream_probe
         post_probe_generations
+        probe_admin_generations_after
+        assert_health_inactive "health_after_all_probes" || true
       else
         warn "Skipping authenticated API probes because auth failed"
       fi

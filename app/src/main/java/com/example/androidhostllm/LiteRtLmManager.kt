@@ -50,6 +50,8 @@ class LiteRtLmManager(private val appContext: Context) {
     @Volatile private var activeGeneration: Boolean = false
     @Volatile private var lastErrorShortMessage: String? = null
     @Volatile private var currentGenerationJob: Job? = null
+    @Volatile private var currentGenerationConversation: Conversation? = null
+    @Volatile private var lastGenerationRecoveryReason: String? = null
     private val performanceHistory = ArrayDeque<PerformanceHistoryEntry>()
 
     suspend fun loadModel(modelPath: String): Result<Unit> = withContext(Dispatchers.IO) {
@@ -103,6 +105,7 @@ class LiteRtLmManager(private val appContext: Context) {
             runCatching {
                 withTimeout(generationTimeoutSeconds * 1000L) {
                     val activeConversation = createConversationForRequestLocked(effectiveConversationMode)
+                    currentGenerationConversation = activeConversation
                     try {
                         val output = activeConversation.sendMessage(prompt).toString()
                         finishGeneration(
@@ -115,6 +118,9 @@ class LiteRtLmManager(private val appContext: Context) {
                         )
                         output
                     } finally {
+                        if (currentGenerationConversation === activeConversation) {
+                            currentGenerationConversation = null
+                        }
                         closeRequestConversationIfNeeded(activeConversation, effectiveConversationMode)
                     }
                 }
@@ -151,6 +157,7 @@ class LiteRtLmManager(private val appContext: Context) {
             runCatching {
                 withTimeout(generationTimeoutSeconds * 1000L) {
                     val activeConversation = createConversationForRequestLocked(effectiveConversationMode)
+                    currentGenerationConversation = activeConversation
                     try {
                         val output = StringBuilder()
                         var firstChunkAt: Long? = null
@@ -188,6 +195,9 @@ class LiteRtLmManager(private val appContext: Context) {
                         )
                         finalOutput
                     } finally {
+                        if (currentGenerationConversation === activeConversation) {
+                            currentGenerationConversation = null
+                        }
                         closeRequestConversationIfNeeded(activeConversation, effectiveConversationMode)
                     }
                 }
@@ -269,20 +279,29 @@ class LiteRtLmManager(private val appContext: Context) {
     fun generationTimeoutSeconds(): Int = generationTimeoutSeconds
 
     fun cancelCurrentGeneration(reason: String = "manual_cancel"): Result<Unit> {
+        return forceClearGeneration(reason)
+    }
+
+    fun forceClearGeneration(
+        reason: String,
+        resetConversation: Boolean = true,
+    ): Result<Unit> {
         val job = currentGenerationJob
-        return when {
-            job != null && activeGeneration -> {
-                job.cancel()
-                Result.success(Unit)
-            }
-            job == null && activeGeneration -> {
-                activeGeneration = false
-                currentGenerationJob = null
-                lastErrorShortMessage = "Recovered stale active generation flag: $reason"
-                Result.success(Unit)
-            }
-            else -> {
-                Result.failure(IllegalStateException("No active generation to cancel"))
+        return runCatching {
+            runCatching { job?.cancel() }
+            activeGeneration = false
+            currentGenerationJob = null
+            lastGenerationRecoveryReason = reason.take(160)
+            lastErrorShortMessage = "Generation state cleared: ${reason.take(120)}"
+            if (resetConversation) {
+                val generationConversation = currentGenerationConversation
+                currentGenerationConversation = null
+                runCatching { generationConversation?.close() }
+                if (generationConversation != null && conversation === generationConversation) {
+                    conversation = null
+                }
+                runCatching { conversation?.close() }
+                conversation = null
             }
         }
     }
@@ -334,6 +353,8 @@ class LiteRtLmManager(private val appContext: Context) {
             totalRequests = totalRequests,
             totalErrors = totalErrors,
             activeGeneration = activeGeneration,
+            activeGenerationAgeMs = if (activeGeneration) lastGenerationStartedAtMs?.let { System.currentTimeMillis() - it } else null,
+            activeGenerationReason = lastGenerationRecoveryReason,
             lastErrorShortMessage = lastErrorShortMessage,
         )
     }
@@ -423,6 +444,8 @@ class LiteRtLmManager(private val appContext: Context) {
         totalRequests += 1
         activeGeneration = true
         currentGenerationJob = job
+        currentGenerationConversation = null
+        lastGenerationRecoveryReason = null
         lastGenerationStartedAtMs = now
         lastFirstChunkLatencyMs = null
         lastGenerationDurationMs = null
@@ -467,6 +490,7 @@ class LiteRtLmManager(private val appContext: Context) {
         )
         activeGeneration = false
         currentGenerationJob = null
+        currentGenerationConversation = null
     }
 
     private fun recordGenerationError(error: Throwable) {
@@ -474,6 +498,7 @@ class LiteRtLmManager(private val appContext: Context) {
         lastErrorShortMessage = shortMessage(error)
         activeGeneration = false
         currentGenerationJob = null
+        currentGenerationConversation = null
     }
 
     private fun createConversationForRequestLocked(effectiveConversationMode: ConversationMode): Conversation {
@@ -520,6 +545,7 @@ class LiteRtLmManager(private val appContext: Context) {
         setSpeculativeDecoding(false)
         activeGeneration = false
         currentGenerationJob = null
+        currentGenerationConversation = null
         if (resetStatus) backendStatus = "Not loaded"
     }
 
@@ -555,6 +581,8 @@ data class PerformanceSnapshot(
     val totalRequests: Long,
     val totalErrors: Long,
     val activeGeneration: Boolean,
+    val activeGenerationAgeMs: Long?,
+    val activeGenerationReason: String?,
     val lastErrorShortMessage: String?,
 ) {
     fun toJson(): JSONObject {
@@ -576,6 +604,8 @@ data class PerformanceSnapshot(
             .put("totalRequests", totalRequests)
             .put("totalErrors", totalErrors)
             .put("activeGeneration", activeGeneration)
+            .put("activeGenerationAgeMs", activeGenerationAgeMs ?: JSONObject.NULL)
+            .put("activeGenerationReason", activeGenerationReason ?: JSONObject.NULL)
             .put("lastErrorShortMessage", lastErrorShortMessage ?: JSONObject.NULL)
     }
 }
