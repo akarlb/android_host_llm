@@ -27,9 +27,7 @@
     <main class="chat-main">
       <section id="model-status-banner" class="status-banner" aria-live="polite">Checking local model...</section>
       <section class="chat-controls" aria-label="Chat controls">
-        <label>Skill:
-          <select id="skill-select"></select>
-        </label>
+        <span id="current-skill-label" class="skill-label">Skill: Default</span>
         <label class="thinking-toggle">
           <input id="show-thinking-toggle" type="checkbox">
           Show thinking
@@ -50,7 +48,10 @@
             <span class="sr-only">Attach Markdown file</span>
             <input id="file-upload" type="file" accept=".md,text/markdown,text/plain">
           </label>
-          <textarea id="message-input" rows="3" placeholder="Ask the local model..." required></textarea>
+          <div class="composer-input-wrap">
+            <textarea id="message-input" rows="3" placeholder="Ask the local model..." required></textarea>
+            <div id="slash-menu" class="slash-menu" role="listbox" hidden></div>
+          </div>
           <div class="send-actions">
             <button id="send-button" type="submit">Send</button>
             <button id="stop-button" type="button" hidden>Stop</button>

@@ -6,6 +6,21 @@ PASSWORD="${PASSWORD:-skills-test-password}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+python3 - <<'PY'
+from pathlib import Path
+chat = Path('app/src/main/assets/web/chat.html').read_text()
+app = Path('app/src/main/assets/web/app.js').read_text()
+assert 'id="skill-select"' not in chat, 'chat skill dropdown should not be present'
+assert 'id="slash-menu"' in chat, 'slash menu container missing'
+assert 'function parseSlashCommand' in app, 'slash parser missing'
+assert 'function updateSlashMenu' in app, 'slash menu updater missing'
+assert 'options.skillSlug' in app, 'message body must include per-message skillSlug'
+start = app.index('async function sendMessage')
+end = app.index('async function stopGeneration', start)
+assert 'changeSkill(' not in app[start:end], 'sendMessage must not call changeSkill for slash commands'
+PY
+echo 'chat slash skill UI static checks ok'
+
 json_post() {
   local path="$1" body="$2"
   curl -fsS -H 'Content-Type: application/json' ${TOKEN:+-H "Authorization: Bearer $TOKEN"} -d "$body" "$BASE_URL$path"

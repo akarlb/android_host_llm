@@ -21,6 +21,27 @@
     streaming: false,
     contextMessage: "",
     toolStatus: "",
+    skillsLoadError: "",
+    slashMenuItems: [],
+    slashMenuIndex: 0,
+  };
+
+  const SKILL_ALIASES = {
+    default: "default",
+    coding: "coding",
+    code: "coding",
+    gdpr: "gdpr-pii-audit",
+    pii: "gdpr-pii-audit",
+    markdown: "markdown-qa",
+    md: "markdown-qa",
+    qa: "markdown-qa",
+  };
+
+  const PREFERRED_SKILL_COMMANDS = {
+    default: "default",
+    coding: "coding",
+    "gdpr-pii-audit": "gdpr",
+    "markdown-qa": "markdown",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -151,12 +172,15 @@
       renderChats();
     });
     $("file-upload").addEventListener("change", uploadFile);
-    $("skill-select").addEventListener("change", () => changeSkill($("skill-select").value));
     $("show-thinking-toggle").addEventListener("change", () => updateThinkingToggle($("show-thinking-toggle").checked));
     $("message-form").addEventListener("submit", sendMessage);
     $("stop-button").addEventListener("click", stopGeneration);
     $("retry-button").addEventListener("click", retryGeneration);
-    $("message-input").addEventListener("keydown", (event) => {
+    const messageInput = $("message-input");
+    messageInput.addEventListener("input", updateSlashMenu);
+    messageInput.addEventListener("blur", () => setTimeout(hideSlashMenu, 120));
+    messageInput.addEventListener("keydown", (event) => {
+      if (handleSlashMenuKeydown(event)) return;
       if (event.key === "Enter" && !event.shiftKey && !state.streaming) {
         event.preventDefault();
         $("message-form").requestSubmit();
@@ -420,9 +444,17 @@
 
 
   async function loadSkills() {
-    const result = await jsonRequest("/api/skills");
-    state.skills = result.skills || [];
+    try {
+      const result = await jsonRequest("/api/skills");
+      state.skills = result.skills || [];
+      state.skillsLoadError = "";
+    } catch (error) {
+      state.skills = [];
+      state.skillsLoadError = error.message || "Skills failed to load.";
+      showError("chat-error", `Skills unavailable: ${state.skillsLoadError}. Normal chat still works.`);
+    }
     renderSkillControls();
+    updateSlashMenu();
   }
 
   async function loadChatSkill(chatId) {
@@ -432,16 +464,12 @@
   }
 
   function renderSkillControls() {
-    const select = $("skill-select");
-    if (!select) return;
-    select.innerHTML = "";
-    state.skills.forEach((skill) => {
-      const option = document.createElement("option");
-      option.value = skill.slug;
-      option.textContent = skill.displayName;
-      if (state.currentSkill && state.currentSkill.slug === skill.slug) option.selected = true;
-      select.appendChild(option);
-    });
+    const label = $("current-skill-label");
+    if (label) {
+      const name = state.currentSkill ? state.currentSkill.displayName : "Default";
+      label.textContent = `Skill: ${name}`;
+      label.title = "Type / to choose a skill for the next message.";
+    }
     const toggle = $("show-thinking-toggle");
     if (toggle) toggle.checked = Boolean(state.skillState && state.skillState.showThinking);
   }
@@ -480,20 +508,149 @@
     if (message) setTimeout(() => { if (el.textContent === message) el.textContent = ""; }, 2500);
   }
 
-  function slashCommand(content) {
+  function preferredCommandForSkill(skill) {
+    return PREFERRED_SKILL_COMMANDS[skill.slug] || skill.slug;
+  }
+
+  function resolveSkillCommand(command) {
+    const normalized = command.replace(/^\//, "").trim().toLowerCase();
+    if (!normalized || state.skillsLoadError) return null;
+    const aliasedSlug = SKILL_ALIASES[normalized] || normalized;
+    return state.skills.find((skill) => skill.slug.toLowerCase() === aliasedSlug.toLowerCase()) || null;
+  }
+
+  function parseSlashCommand(content) {
     if (!content.startsWith("/")) return null;
-    const [command, ...rest] = content.split(/\s+/);
-    const aliases = {
-      "/default": "default",
-      "/coding": "coding",
-      "/code": "coding",
-      "/gdpr": "gdpr-pii-audit",
-      "/pii": "gdpr-pii-audit",
-      "/markdown": "markdown-qa",
-      "/md": "markdown-qa",
-      "/qa": "markdown-qa",
-    };
-    return { slug: aliases[command.toLowerCase()] || null, trailing: rest.join(" ").trim(), command };
+    if (content.trim() === "/") {
+      return { command: "/", skillSlug: null, skill: null, trailing: "", isOnlyCommand: true, error: "Type / to choose a skill." };
+    }
+    const match = content.match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/);
+    if (!match) {
+      return { command: "/", skillSlug: null, skill: null, trailing: "", isOnlyCommand: true, error: "Type / to choose a skill." };
+    }
+    const command = `/${match[1]}`;
+    const trailing = (match[2] || "").trim();
+    const skill = resolveSkillCommand(command);
+    if (!skill) {
+      const error = state.skillsLoadError
+        ? `Skills unavailable: ${state.skillsLoadError}. Normal chat still works.`
+        : `Unknown skill command: ${command}. Type / to choose a skill.`;
+      return { command, skillSlug: null, skill: null, trailing, isOnlyCommand: !trailing, error };
+    }
+    return { command, skillSlug: skill.slug, skill, trailing, isOnlyCommand: !trailing, error: null };
+  }
+
+  function slashCommandFragment(value) {
+    if (!value.startsWith("/")) return null;
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("/") || /\s/.test(trimmed)) return null;
+    return trimmed.slice(1).toLowerCase();
+  }
+
+  function slashMenuMatches(fragment) {
+    if (state.skillsLoadError) return [];
+    const query = (fragment || "").toLowerCase();
+    return state.skills
+      .map((skill) => ({ skill, command: preferredCommandForSkill(skill) }))
+      .filter((item) => {
+        const aliasText = Object.entries(SKILL_ALIASES)
+          .filter(([, slug]) => slug.toLowerCase() === item.skill.slug.toLowerCase())
+          .map(([alias]) => alias)
+          .join(" ");
+        const haystack = `${item.command} ${item.skill.slug} ${item.skill.displayName || ""} ${item.skill.description || ""} ${aliasText}`.toLowerCase();
+        return !query || haystack.includes(query);
+      })
+      .slice(0, 8);
+  }
+
+  function updateSlashMenu() {
+    const input = $("message-input");
+    const menu = $("slash-menu");
+    if (!input || !menu) return;
+    const fragment = slashCommandFragment(input.value);
+    if (fragment == null) {
+      hideSlashMenu();
+      return;
+    }
+    if (state.skillsLoadError) {
+      menu.hidden = false;
+      menu.innerHTML = `<div class="slash-menu-empty">Skills unavailable: ${escapeText(state.skillsLoadError)}</div>`;
+      return;
+    }
+    state.slashMenuItems = slashMenuMatches(fragment);
+    state.slashMenuIndex = Math.min(state.slashMenuIndex, Math.max(state.slashMenuItems.length - 1, 0));
+    renderSlashMenu();
+  }
+
+  function renderSlashMenu() {
+    const menu = $("slash-menu");
+    if (!menu) return;
+    menu.hidden = false;
+    if (!state.slashMenuItems.length) {
+      menu.innerHTML = `<div class="slash-menu-empty">No matching skills. Type / to choose a skill.</div>`;
+      return;
+    }
+    menu.innerHTML = "";
+    state.slashMenuItems.forEach((item, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `slash-menu-item${index === state.slashMenuIndex ? " active" : ""}`;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", index === state.slashMenuIndex ? "true" : "false");
+      button.innerHTML = `
+        <span class="slash-menu-command">/${escapeText(item.command)}</span>
+        <span class="slash-menu-name">${escapeText(item.skill.displayName || item.skill.slug)}</span>
+        <span class="slash-menu-description">${escapeText(item.skill.description || item.skill.slug)}</span>
+      `;
+      button.addEventListener("mousedown", (event) => event.preventDefault());
+      button.addEventListener("click", () => selectSlashMenuItem(index));
+      menu.appendChild(button);
+    });
+  }
+
+  function hideSlashMenu() {
+    const menu = $("slash-menu");
+    if (!menu) return;
+    menu.hidden = true;
+    menu.innerHTML = "";
+    state.slashMenuItems = [];
+    state.slashMenuIndex = 0;
+  }
+
+  function selectSlashMenuItem(index = state.slashMenuIndex) {
+    const item = state.slashMenuItems[index];
+    if (!item) return false;
+    const input = $("message-input");
+    input.value = `/${item.command} `;
+    input.focus();
+    hideSlashMenu();
+    showSkillStatus(`${item.skill.displayName || item.skill.slug} selected. Add your message after /${item.command} and press Send.`);
+    return true;
+  }
+
+  function handleSlashMenuKeydown(event) {
+    const menu = $("slash-menu");
+    const input = $("message-input");
+    if (!menu || menu.hidden || !input.value.startsWith("/")) return false;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      hideSlashMenu();
+      return true;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!state.slashMenuItems.length) return true;
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      state.slashMenuIndex = (state.slashMenuIndex + direction + state.slashMenuItems.length) % state.slashMenuItems.length;
+      renderSlashMenu();
+      return true;
+    }
+    if (event.key === "Enter" && !event.shiftKey && slashCommandFragment(input.value) != null && state.slashMenuItems.length) {
+      event.preventDefault();
+      selectSlashMenuItem();
+      return true;
+    }
+    return false;
   }
 
   async function sendMessage(event) {
@@ -501,20 +658,30 @@
     if (state.streaming) return;
     const input = $("message-input");
     let content = input.value.trim();
-    if (!content || !state.currentChatId) return;
+    if (!content) return;
     showError("chat-error", "");
-    const command = slashCommand(content);
-    if (command) {
-      if (!command.slug) {
-        showError("chat-error", `Unknown slash command: ${command.command}`);
+    if (!state.currentChatId) {
+      showError("chat-error", "No active chat. Create or select a chat before sending.");
+      return;
+    }
+    const parsedCommand = parseSlashCommand(content);
+    let skillSlugForMessage;
+    if (parsedCommand) {
+      if (parsedCommand.error) {
+        showError("chat-error", parsedCommand.error);
+        updateSlashMenu();
         return;
       }
-      await changeSkill(command.slug);
-      if (!command.trailing) {
-        input.value = "";
+      if (parsedCommand.isOnlyCommand) {
+        const command = preferredCommandForSkill(parsedCommand.skill);
+        input.value = `/${command} `;
+        input.focus();
+        showSkillStatus(`${parsedCommand.skill.displayName || parsedCommand.skill.slug} selected. Add your message after /${command} and press Send.`);
+        hideSlashMenu();
         return;
       }
-      content = command.trailing;
+      skillSlugForMessage = parsedCommand.skillSlug;
+      content = parsedCommand.trailing;
     }
     state.streaming = true;
     state.currentGenerationId = null;
@@ -526,10 +693,11 @@
     appendMessage("user", content, { final: true });
     const assistantContent = appendMessage("assistant", "");
     showTypingIndicator(assistantContent);
+    hideSlashMenu();
     try {
-      await streamMessage(content, assistantContent);
+      await streamMessage(content, assistantContent, { skillSlug: skillSlugForMessage });
       await loadSkills();
-    await loadChats();
+      await loadChats();
     } catch (error) {
       clearTypingIndicator(assistantContent);
       const message = userFacingGenerationError(error);
@@ -585,7 +753,7 @@
     }
   }
 
-  async function streamMessage(content, assistantContent) {
+  async function streamMessage(content, assistantContent, options = {}) {
     const response = await fetch(`/api/chats/${encodeURIComponent(state.currentChatId)}/messages`, {
       method: "POST",
       headers: headers({ "Content-Type": "application/json" }),
@@ -593,7 +761,7 @@
         content,
         stream: true,
         fileIds: state.attachedFiles.map((file) => file.id),
-        skillSlug: state.currentSkill ? state.currentSkill.slug : undefined,
+        skillSlug: options.skillSlug || (state.currentSkill ? state.currentSkill.slug : undefined),
         thinkingEnabled: state.skillState ? state.skillState.thinkingEnabled : undefined,
         showThinking: state.skillState ? state.skillState.showThinking : false,
       }),
