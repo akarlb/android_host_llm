@@ -52,6 +52,7 @@ class LiteRtLmManager(private val appContext: Context) {
     @Volatile private var currentGenerationJob: Job? = null
     @Volatile private var currentGenerationConversation: Conversation? = null
     @Volatile private var lastGenerationRecoveryReason: String? = null
+    @Volatile private var forceFreshNextGeneration: Boolean = false
     private val performanceHistory = ArrayDeque<PerformanceHistoryEntry>()
 
     suspend fun loadModel(modelPath: String): Result<Unit> = withContext(Dispatchers.IO) {
@@ -260,6 +261,15 @@ class LiteRtLmManager(private val appContext: Context) {
 
     fun conversationMode(): ConversationMode = conversationMode
 
+    fun consumeRecoveryConversationMode(preferred: ConversationMode): ConversationMode {
+        return if (forceFreshNextGeneration) {
+            forceFreshNextGeneration = false
+            ConversationMode.FRESH_PER_REQUEST
+        } else {
+            preferred
+        }
+    }
+
     fun setSpeculativeDecodingRequested(value: Boolean) {
         speculativeDecodingRequested = value
         if (!value) {
@@ -291,6 +301,7 @@ class LiteRtLmManager(private val appContext: Context) {
             runCatching { job?.cancel() }
             activeGeneration = false
             currentGenerationJob = null
+            forceFreshNextGeneration = true
             lastGenerationRecoveryReason = reason.take(160)
             lastErrorShortMessage = "Generation state cleared: ${reason.take(120)}"
             if (resetConversation) {
