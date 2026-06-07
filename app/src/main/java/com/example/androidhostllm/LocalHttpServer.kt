@@ -35,6 +35,9 @@ private data class GenerationActiveSummary(
     val activeCount: Int,
     val jobStoreActiveCount: Int,
     val expiredStaleCount: Int,
+    val recoveredStaleLiteRt: Boolean,
+    val liteRtActiveAgeMs: Long?,
+    val liteRtActiveReason: String?,
     val activeJob: GenerationJobRecord?,
 )
 
@@ -365,7 +368,7 @@ class LocalHttpServer(
         val databaseAvailable = runCatching {
             AppDatabase(appContext).readableDatabase.rawQuery("SELECT 1", emptyArray()).use { it.moveToFirst() }
         }.getOrDefault(false)
-        val generationSummary = generationActiveSummary()
+        val generationSummary = generationActiveSummary(recoverStaleLiteRt = true)
         return JSONObject()
             .put("status", "ok")
             .put("appAlive", true)
@@ -580,7 +583,7 @@ class LocalHttpServer(
             val files = fileRepository.listAdminFileOverviews()
             val users = authRepository.listAdminUserOverviews()
             val perf = liteRtLmManager.performanceSnapshot()
-            val generationSummary = generationActiveSummary(perf.activeGeneration)
+            val generationSummary = generationActiveSummary(recoverStaleLiteRt = true)
             jsonResponse(
                 Response.Status.OK,
                 JSONObject()
@@ -633,7 +636,7 @@ class LocalHttpServer(
     }
 
     private fun adminGenerationsResponse(session: IHTTPSession): Response = withAdmin(session) {
-        val summary = generationActiveSummary()
+        val summary = generationActiveSummary(recoverStaleLiteRt = true)
         val generations = JSONArray()
         generationJobs.recentAll().forEach { generations.put(generationJobJson(it, admin = true)) }
         jsonResponse(
@@ -646,7 +649,7 @@ class LocalHttpServer(
 
     private fun adminCancelAllGenerationsResponse(session: IHTTPSession): Response = withAdmin(session) {
         val cancelled = generationJobs.cancelAllActive("Cancelled by admin")
-        val liteRtCancel = liteRtLmManager.cancelCurrentGeneration("admin_cancel_all_active")
+        val liteRtCancel = liteRtLmManager.forceClearGeneration("admin_cancel_all_active")
         val summary = generationActiveSummary()
         jsonResponse(
             Response.Status.OK,
@@ -663,7 +666,7 @@ class LocalHttpServer(
 
     private fun adminCancelGenerationResponse(session: IHTTPSession, generationId: String): Response = withAdmin(session) {
         val job = generationJobs.get(generationId) ?: return@withAdmin notFoundResponse()
-        val liteRtCancel = if (job.isActive) liteRtLmManager.cancelCurrentGeneration("admin_cancel_generation") else Result.success(Unit)
+        val liteRtCancel = if (job.isActive) liteRtLmManager.forceClearGeneration("admin_cancel_generation") else Result.success(Unit)
         val cancelled = if (job.isActive) {
             generationJobs.cancel(generationId, "Cancelled by admin") ?: job
         } else {
@@ -1043,7 +1046,7 @@ class LocalHttpServer(
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val job = generationJobs.get(generationId) ?: return notFoundResponse()
         if (job.userId != user.id) return notFoundResponse()
-        liteRtLmManager.cancelCurrentGeneration("user_cancel_generation")
+        liteRtLmManager.forceClearGeneration("user_cancel_generation")
         val cancelled = generationJobs.cancel(generationId) ?: job
         return jsonResponse(Response.Status.OK, JSONObject().put("generation", generationJobJson(cancelled)))
     }
@@ -1052,7 +1055,7 @@ class LocalHttpServer(
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
         val job = generationJobs.activeForChat(chatId) ?: return errorResponse(Response.Status.CONFLICT, "no_active_generation", "No active generation for this chat")
-        liteRtLmManager.cancelCurrentGeneration("user_cancel_chat_generation")
+        liteRtLmManager.forceClearGeneration("user_cancel_chat_generation")
         val cancelled = generationJobs.cancel(job.id) ?: job
         return jsonResponse(Response.Status.OK, JSONObject().put("generation", generationJobJson(cancelled)))
     }
@@ -1060,7 +1063,7 @@ class LocalHttpServer(
     private fun retryChatGenerationResponse(session: IHTTPSession, chatId: String): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
-        val generationSummary = generationActiveSummary()
+        val generationSummary = generationActiveSummary(recoverStaleLiteRt = true)
         if (generationSummary.jobStoreActive || generationSummary.liteRtActive) {
             return activeGenerationConflictResponse(generationSummary)
         }
@@ -1077,25 +1080,34 @@ class LocalHttpServer(
         if (!liteRtLmManager.isLoaded()) return errorResponse(Response.Status.SERVICE_UNAVAILABLE, "model_not_loaded", "Model is not loaded")
         val job = generationJobs.create(chat.id, user.id, lastUser.id)
         generationJobs.markRunning(job.id, streaming = false)
-        val result = generateAppReply(user.id, chat, lastUser, promptPlan, responseMode, ConversationMode.FRESH_PER_REQUEST)
-        return result.fold(
-            onSuccess = { (usedPlan, parsed) ->
-                updateContextState(chat.id, usedPlan.context)
-                val assistant = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
-                val done = generationJobs.complete(job.id, assistant.id, parsed.finalText) ?: job
-                jsonResponse(Response.Status.OK, JSONObject().put("message", messageJson(assistant)).put("generation", generationJobJson(done)))
-            },
-            onFailure = {
-                val failed = generationJobs.fail(job.id, it) ?: job
-                jsonResponse(Response.Status.INTERNAL_ERROR, JSONObject().put("error", promptBudgetManager.friendlyError(it).second).put("generation", generationJobJson(failed)))
-            }
-        )
+        return try {
+            val result = generateAppReply(user.id, chat, lastUser, promptPlan, responseMode, ConversationMode.FRESH_PER_REQUEST)
+            result.fold(
+                onSuccess = { (usedPlan, parsed) ->
+                    updateContextState(chat.id, usedPlan.context)
+                    val assistant = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
+                    val done = generationJobs.complete(job.id, assistant.id, parsed.finalText) ?: job
+                    jsonResponse(Response.Status.OK, JSONObject().put("message", messageJson(assistant)).put("generation", generationJobJson(done)))
+                },
+                onFailure = {
+                    liteRtLmManager.forceClearGeneration("retry generation failed")
+                    val failed = generationJobs.fail(job.id, it) ?: job
+                    jsonResponse(Response.Status.INTERNAL_ERROR, JSONObject().put("error", promptBudgetManager.friendlyError(it).second).put("generation", generationJobJson(failed)))
+                }
+            )
+        } catch (error: Throwable) {
+            liteRtLmManager.forceClearGeneration("retry generation route failed")
+            val failed = generationJobs.finishIfStillActive(job.id, GenerationStatus.FAILED, "generation_failed", error.message ?: "Generation failed.") ?: job
+            jsonResponse(Response.Status.INTERNAL_ERROR, JSONObject().put("error", error.message ?: "Generation failed").put("generation", generationJobJson(failed)))
+        } finally {
+            generationJobs.finishIfStillActive(job.id, GenerationStatus.FAILED, "generation_finalization_failed", "Generation ended without completing or failing the job.")
+        }
     }
 
     private fun createMessageResponse(session: IHTTPSession, chatId: String): Response {
         val user = requireAppUser(session) ?: return unauthorizedResponse()
         val chat = chatRepository.getChat(user.id, chatId) ?: return notFoundResponse()
-        val generationSummary = generationActiveSummary()
+        val generationSummary = generationActiveSummary(recoverStaleLiteRt = true)
         if (generationSummary.jobStoreActive || generationSummary.liteRtActive) {
             return activeGenerationConflictResponse(generationSummary)
         }
@@ -1144,35 +1156,50 @@ class LocalHttpServer(
                 return errorResponse(Response.Status.SERVICE_UNAVAILABLE, "model_not_loaded", "Model is not loaded")
             }
             generationJobs.markRunning(generationJob.id, streaming = false)
-            val result = generateAppReply(user.id, chat, userMessage, promptPlan, responseMode, conversationMode)
-            result.fold(
-                onSuccess = { (usedPlan, parsed) ->
-                    updateContextState(chat.id, usedPlan.context)
-                    val assistantMessage = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
-                    val completedJob = generationJobs.complete(generationJob.id, assistantMessage.id, parsed.finalText) ?: generationJob
-                    jsonResponse(
-                        Response.Status.OK,
-                        JSONObject()
-                            .put("message", messageJson(assistantMessage))
-                            .put("userMessage", messageJson(userMessage))
-                            .put("context", contextJson(usedPlan.plan.contextMetadata))
-                            .put("skill", skillJson(usedPlan.skill, false))
-                            .put("generation", generationJobJson(completedJob))
-                            .put("thinking", JSONObject().put("present", parsed.thinkingText != null).put("visible", usedPlan.skillState.showThinking))
-                    )
-                },
-                onFailure = { error ->
-                    val failedJob = generationJobs.fail(generationJob.id, error) ?: generationJob
-                    val friendly = promptBudgetManager.friendlyError(error)
-                    jsonResponse(
-                        Response.Status.INTERNAL_ERROR,
-                        JSONObject()
-                            .put("error", friendly.second)
-                            .put("code", friendly.first)
-                            .put("generation", generationJobJson(failedJob))
-                    )
-                }
-            )
+            try {
+                val result = generateAppReply(user.id, chat, userMessage, promptPlan, responseMode, conversationMode)
+                result.fold(
+                    onSuccess = { (usedPlan, parsed) ->
+                        updateContextState(chat.id, usedPlan.context)
+                        val assistantMessage = chatRepository.addMessage(chat.id, "assistant", parsed.finalText, thinking = parsed.thinkingText, rawContent = parsed.rawModelText)
+                        val completedJob = generationJobs.complete(generationJob.id, assistantMessage.id, parsed.finalText) ?: generationJob
+                        jsonResponse(
+                            Response.Status.OK,
+                            JSONObject()
+                                .put("message", messageJson(assistantMessage))
+                                .put("userMessage", messageJson(userMessage))
+                                .put("context", contextJson(usedPlan.plan.contextMetadata))
+                                .put("skill", skillJson(usedPlan.skill, false))
+                                .put("generation", generationJobJson(completedJob))
+                                .put("thinking", JSONObject().put("present", parsed.thinkingText != null).put("visible", usedPlan.skillState.showThinking))
+                        )
+                    },
+                    onFailure = { error ->
+                        liteRtLmManager.forceClearGeneration("app message generation failed")
+                        val failedJob = generationJobs.fail(generationJob.id, error) ?: generationJob
+                        val friendly = promptBudgetManager.friendlyError(error)
+                        jsonResponse(
+                            Response.Status.INTERNAL_ERROR,
+                            JSONObject()
+                                .put("error", friendly.second)
+                                .put("code", friendly.first)
+                                .put("generation", generationJobJson(failedJob))
+                        )
+                    }
+                )
+            } catch (error: Throwable) {
+                liteRtLmManager.forceClearGeneration("app message generation route failed")
+                val failedJob = generationJobs.finishIfStillActive(generationJob.id, GenerationStatus.FAILED, "generation_failed", error.message ?: "Generation failed.") ?: generationJob
+                jsonResponse(
+                    Response.Status.INTERNAL_ERROR,
+                    JSONObject()
+                        .put("error", error.message ?: "Generation failed")
+                        .put("code", "generation_failed")
+                        .put("generation", generationJobJson(failedJob))
+                )
+            } finally {
+                generationJobs.finishIfStillActive(generationJob.id, GenerationStatus.FAILED, "generation_finalization_failed", "Generation ended without completing or failing the job.")
+            }
         }
     }
 
@@ -1238,6 +1265,10 @@ class LocalHttpServer(
         if (!liteRtLmManager.isLoaded()) {
             return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, JSONObject().put("error", "Model is not loaded"))
         }
+        val generationSummary = generationActiveSummary(recoverStaleLiteRt = true)
+        if (generationSummary.jobStoreActive || generationSummary.liteRtActive) {
+            return activeGenerationConflictResponse(generationSummary)
+        }
         val requestJson = readJsonRequest(session) ?: return jsonResponse(
             Response.Status.BAD_REQUEST,
             JSONObject().put("error", "Malformed JSON or missing JSON body")
@@ -1286,6 +1317,9 @@ class LocalHttpServer(
                 }
             }
             val snapshot = liteRtLmManager.performanceSnapshot()
+            if (result.isFailure) {
+                liteRtLmManager.forceClearGeneration("benchmark generation failed")
+            }
             results.put(benchmarkResultJson(index + 1, snapshot, effectiveConversationMode, effectiveResponseMode, result.exceptionOrNull()))
         }
 
@@ -1342,6 +1376,10 @@ class LocalHttpServer(
                 JSONObject().put("error", "Model is not loaded")
             )
         }
+        val generationSummary = generationActiveSummary(recoverStaleLiteRt = true)
+        if (generationSummary.jobStoreActive || generationSummary.liteRtActive) {
+            return activeGenerationConflictResponse(generationSummary)
+        }
 
         val body = try {
             readBody(session)
@@ -1384,6 +1422,7 @@ class LocalHttpServer(
                 jsonResponse(Response.Status.OK, chatCompletionJson(completionId, nowSeconds, output))
             },
             onFailure = { error ->
+                liteRtLmManager.forceClearGeneration("openai chat completion generation failed")
                 jsonResponse(
                     Response.Status.INTERNAL_ERROR,
                     JSONObject().put("error", "Generation failed: ${error.message}")
@@ -1450,12 +1489,15 @@ class LocalHttpServer(
                             writeEvent("[DONE]")
                         },
                         onFailure = { error ->
+                            liteRtLmManager.forceClearGeneration("openai streaming generation failed")
                             writeEvent(streamingErrorJson(error).toString())
                             writeEvent("[DONE]")
                         }
                     )
-                } catch (_: Throwable) {
-                    // The client may have disconnected; LiteRtLmManager clears its active flag when generation unwinds.
+                } catch (error: Throwable) {
+                    liteRtLmManager.forceClearGeneration(
+                        if (isLikelyClientDisconnect(error)) "openai streaming client disconnected" else "openai streaming response failed"
+                    )
                 }
             }
         }.apply {
@@ -1981,6 +2023,7 @@ class LocalHttpServer(
                             writeEvent("[DONE]")
                         },
                         onFailure = { error ->
+                            liteRtLmManager.forceClearGeneration("app streaming generation failed")
                             generationJobs.fail(generationId, error)
                             writeEvent(appStreamingErrorJson(error).toString())
                             writeEvent(JSONObject().put("generation", generationJobJson(generationJobs.get(generationId)!!)).toString())
@@ -1988,6 +2031,9 @@ class LocalHttpServer(
                         }
                     )
                 } catch (error: Throwable) {
+                    liteRtLmManager.forceClearGeneration(
+                        if (isLikelyClientDisconnect(error)) "app streaming client disconnected" else "app streaming response failed"
+                    )
                     if (isLikelyClientDisconnect(error)) {
                         generationJobs.finishIfStillActive(
                             generationId,
@@ -2003,6 +2049,13 @@ class LocalHttpServer(
                             error.message ?: "Streaming response failed.",
                         )
                     }
+                } finally {
+                    generationJobs.finishIfStillActive(
+                        generationId,
+                        GenerationStatus.FAILED,
+                        "streaming_generation_unfinished",
+                        "Streaming generation ended without completing or failing the job.",
+                    )
                 }
             }
         }.apply {
@@ -2177,9 +2230,28 @@ class LocalHttpServer(
             .put("createdAtMs", log.createdAtMs)
     }
 
-    private fun generationActiveSummary(liteRtActiveOverride: Boolean? = null): GenerationActiveSummary {
-        val jobSummary = generationJobs.activeSummary()
-        val liteRtActive = liteRtActiveOverride ?: liteRtLmManager.performanceSnapshot().activeGeneration
+    private fun generationActiveSummary(
+        liteRtActiveOverride: Boolean? = null,
+        recoverStaleLiteRt: Boolean = false,
+    ): GenerationActiveSummary {
+        val staleAfterMs = liteRtLmManager.generationTimeoutSeconds() * 1000L + STALE_LITERT_RECOVERY_GRACE_MS
+        if (recoverStaleLiteRt) {
+            generationJobs.cleanupStaleActive(staleAfterMs)
+        }
+        var jobSummary = generationJobs.activeSummary()
+        val firstSnapshot = liteRtLmManager.performanceSnapshot()
+        var recoveredStaleLiteRt = false
+        if (recoverStaleLiteRt && liteRtActiveOverride == null && firstSnapshot.activeGeneration) {
+            val activeAgeMs = firstSnapshot.activeGenerationAgeMs
+            if (activeAgeMs != null && activeAgeMs > staleAfterMs) {
+                liteRtLmManager.forceClearGeneration("stale active generation recovered before conflict")
+                generationJobs.cleanupStaleActive(staleAfterMs)
+                jobSummary = generationJobs.activeSummary()
+                recoveredStaleLiteRt = true
+            }
+        }
+        val snapshot = if (recoveredStaleLiteRt) liteRtLmManager.performanceSnapshot() else firstSnapshot
+        val liteRtActive = liteRtActiveOverride ?: snapshot.activeGeneration
         val jobStoreActive = jobSummary.activeCount > 0
         val source = when {
             jobStoreActive && liteRtActive -> "both"
@@ -2194,6 +2266,9 @@ class LocalHttpServer(
             activeCount = jobSummary.activeCount + if (liteRtActive) 1 else 0,
             jobStoreActiveCount = jobSummary.activeCount,
             expiredStaleCount = jobSummary.expiredStaleCount,
+            recoveredStaleLiteRt = recoveredStaleLiteRt,
+            liteRtActiveAgeMs = snapshot.activeGenerationAgeMs,
+            liteRtActiveReason = snapshot.activeGenerationReason,
             activeJob = jobSummary.activeJob,
         )
     }
@@ -2206,6 +2281,9 @@ class LocalHttpServer(
             .put("activeCount", summary.activeCount)
             .put("jobStoreActiveCount", summary.jobStoreActiveCount)
             .put("expiredStaleCount", summary.expiredStaleCount)
+            .put("recoveredStaleLiteRt", summary.recoveredStaleLiteRt)
+            .put("liteRtActiveAgeMs", summary.liteRtActiveAgeMs ?: JSONObject.NULL)
+            .put("liteRtActiveReason", summary.liteRtActiveReason ?: JSONObject.NULL)
         if (includeActiveJob) {
             json.put("activeJob", summary.activeJob?.let { generationJobJson(it, admin = true) } ?: JSONObject.NULL)
         }
@@ -2561,5 +2639,6 @@ class LocalHttpServer(
         const val STREAM_PIPE_BUFFER_BYTES = 64 * 1024
         const val MAX_PROMPT_MESSAGES = 24
         const val CHUNK_PREVIEW_CHARS = 500
+        const val STALE_LITERT_RECOVERY_GRACE_MS = 5_000L
     }
 }
