@@ -12,8 +12,11 @@
     adminSkills: [],
     adminTools: [],
     adminToolLogs: [],
+    adminGenerations: [],
+    adminGenerationSummary: null,
     selectedAdminSkill: null,
     currentGenerationId: null,
+    currentChatGeneration: null,
     chatFilter: "",
     streaming: false,
     contextMessage: "",
@@ -50,7 +53,13 @@
     });
     const text = await response.text();
     const body = text ? JSON.parse(text) : {};
-    if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+    if (!response.ok) {
+      const error = new Error(body.error || `Request failed (${response.status})`);
+      error.status = response.status;
+      error.code = body.errorDetails ? body.errorDetails.code : body.code;
+      error.details = body.errorDetails ? body.errorDetails.details : body.details;
+      throw error;
+    }
     return body;
   }
 
@@ -181,6 +190,8 @@
     $("ops-diagnostics-button").addEventListener("click", downloadDiagnostics);
     $("ops-scan-button").addEventListener("click", scanStorage);
     $("ops-cleanup-button").addEventListener("click", cleanupStorage);
+    $("generations-refresh-button").addEventListener("click", loadAdminGenerations);
+    $("generations-cancel-all-button").addEventListener("click", cancelAllGenerations);
     if (current.user.role !== "ADMIN") {
       $("admin-denied").hidden = false;
       return;
@@ -192,18 +203,22 @@
   async function loadAdminDashboard() {
     showError("admin-error", "");
     try {
-      const [status, users, files, skills, tools, logs] = await Promise.all([
+      const [status, users, files, skills, tools, logs, generations] = await Promise.all([
         jsonRequest("/api/admin/status"),
         jsonRequest("/api/admin/users"),
         jsonRequest("/api/admin/files"),
         jsonRequest("/api/admin/skills"),
         jsonRequest("/api/admin/tools"),
         jsonRequest("/api/admin/tools/logs"),
+        jsonRequest("/api/admin/generations"),
       ]);
       state.adminSkills = skills.skills || [];
       state.adminTools = tools.tools || [];
       state.adminToolLogs = logs.logs || [];
+      state.adminGenerations = generations.generations || [];
+      state.adminGenerationSummary = generations.generation || status.generation || null;
       renderAdminStatus(status);
+      renderAdminGenerations();
       renderAdminUrls(status);
       renderAdminUsers(users.users || []);
       renderAdminFiles(status, files.files || []);
@@ -257,10 +272,47 @@
     state.messages = result.messages || [];
     state.attachedFiles = result.files || [];
     await loadChatSkill(chatId);
+    await loadChatGenerations(chatId);
     renderChats();
     renderMessages();
     renderSelectedFiles();
     renderSkillControls();
+  }
+
+  async function loadChatGenerations(chatId = state.currentChatId) {
+    if (!chatId) return;
+    try {
+      const result = await jsonRequest(`/api/chats/${encodeURIComponent(chatId)}/generations`);
+      state.currentChatGeneration = result.activeGeneration || null;
+      renderChatGenerationStatus();
+    } catch (_) {
+      state.currentChatGeneration = null;
+      renderChatGenerationStatus();
+    }
+  }
+
+  function renderChatGenerationStatus() {
+    const holder = $("chat-generation-status");
+    if (!holder) return;
+    const job = state.currentChatGeneration;
+    if (!job || !job.isActive) {
+      holder.hidden = true;
+      holder.innerHTML = "";
+      return;
+    }
+    holder.hidden = false;
+    holder.innerHTML = `
+      <div>
+        <strong>Previous generation still active</strong>
+        <span>${escapeText(job.status || "active")} - ${formatDuration(job.activeAgeMs || job.ageMs)}</span>
+      </div>
+      <div class="button-row tight">
+        <button type="button" data-action="cancel">Cancel</button>
+        <button type="button" data-action="refresh">Refresh</button>
+      </div>
+    `;
+    holder.querySelector('[data-action="cancel"]').addEventListener("click", stopGeneration);
+    holder.querySelector('[data-action="refresh"]').addEventListener("click", () => loadChatGenerations());
   }
 
   function renderChats() {
@@ -480,8 +532,9 @@
     await loadChats();
     } catch (error) {
       clearTypingIndicator(assistantContent);
-      showError("chat-error", error.message);
-      assistantContent.textContent = error.message;
+      const message = userFacingGenerationError(error);
+      showError("chat-error", message);
+      assistantContent.textContent = message;
     } finally {
       state.streaming = false;
       state.currentGenerationId = null;
@@ -500,8 +553,9 @@
     try {
       await jsonRequest(path, { method: "POST", body: "{}" });
       showError("chat-error", "Generation stopped.");
+      await loadChatGenerations();
     } catch (error) {
-      showError("chat-error", error.message);
+      showError("chat-error", userFacingGenerationError(error));
     }
   }
 
@@ -546,7 +600,11 @@
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
-      throw new Error(body.error || `Message failed (${response.status})`);
+      const error = new Error(body.error || `Message failed (${response.status})`);
+      error.status = response.status;
+      error.code = body.errorDetails ? body.errorDetails.code : body.code;
+      error.details = body.errorDetails ? body.errorDetails.details : body.details;
+      throw error;
     }
     if (!response.body) throw new Error("Streaming is not available in this browser.");
 
@@ -605,6 +663,17 @@
         }
       }
     }
+  }
+
+  function userFacingGenerationError(error) {
+    if (error && (error.code === "generation_active" || /Another generation is already active/i.test(error.message || ""))) {
+      const source = error.details && error.details.activeGenerationSource && error.details.activeGenerationSource !== "none"
+        ? ` Source: ${error.details.activeGenerationSource}.`
+        : "";
+      const adminHint = state.user && state.user.role === "ADMIN" ? " Open Admin -> Generations to cancel it, or restart the local server." : " Ask an admin to open Admin -> Generations to cancel it, or restart the local server.";
+      return `Another generation is active, possibly in another chat or from an interrupted stream.${source}${adminHint}`;
+    }
+    return error ? error.message : "Request failed.";
   }
 
   async function loadChatFiles() {
@@ -829,14 +898,81 @@
       : status.speculativeDecodingRequested
         ? "requested"
         : "disabled";
+    const generation = status.generation || {};
     renderDefinitionList("system-status", [
       ["Model loaded", status.modelLoaded ? "Yes" : "No"],
       ["Backend", status.backendStatus || "Unknown"],
       ["Server mode", status.serverMode || "Unknown"],
       ["LAN IP", status.lanIp || "Unavailable"],
       ["MTP/speculative decoding", speculative],
-      ["Active generation", status.activeGeneration ? "Yes" : "No"],
+      ["Active generation", status.activeGeneration ? `Yes (${generation.activeGenerationSource || "unknown"})` : "No"],
     ]);
+  }
+
+  async function loadAdminGenerations() {
+    showError("admin-error", "");
+    $("generation-admin-message").textContent = "";
+    try {
+      const result = await jsonRequest("/api/admin/generations");
+      state.adminGenerations = result.generations || [];
+      state.adminGenerationSummary = result.generation || null;
+      renderAdminGenerations();
+    } catch (error) {
+      if (error.status === 401) $("admin-login").hidden = false;
+      else showError("admin-error", error.message);
+    }
+  }
+
+  function renderAdminGenerations() {
+    const summary = state.adminGenerationSummary || {};
+    renderDefinitionList("generation-status", [
+      ["Active source", summary.activeGenerationSource || "none"],
+      ["Active count", String(summary.activeCount || 0)],
+      ["Job store active", summary.jobStoreActive ? `Yes (${summary.jobStoreActiveCount || 0})` : "No"],
+      ["LiteRT active", summary.liteRtActive ? "Yes" : "No"],
+      ["Expired stale jobs", String(summary.expiredStaleCount || 0)],
+    ]);
+    const body = $("admin-generations");
+    body.innerHTML = "";
+    if (!state.adminGenerations.length) {
+      body.innerHTML = '<tr><td colspan="5" class="muted">No generation jobs recorded yet.</td></tr>';
+      return;
+    }
+    state.adminGenerations.forEach((job) => {
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>${escapeText(job.status || "unknown")}</td>
+        <td>${escapeText(formatDuration(job.activeAgeMs || job.ageMs))}</td>
+        <td><code>${escapeText(job.chatId || "")}</code></td>
+        <td>${escapeText(job.errorMessage || job.errorCode || "-")}</td>
+        <td>${job.isActive ? '<button type="button">Cancel</button>' : '<span class="muted">-</span>'}</td>
+      `;
+      const button = row.querySelector("button");
+      if (button) button.addEventListener("click", () => cancelAdminGeneration(job.id));
+      body.appendChild(row);
+    });
+  }
+
+  async function cancelAllGenerations() {
+    $("generation-admin-message").textContent = "";
+    try {
+      const result = await jsonRequest("/api/admin/generations/cancel-all-active", { method: "POST", body: "{}" });
+      $("generation-admin-message").textContent = `Cancelled ${Number(result.cancelledCount || 0)} active generation job(s). LiteRT active: ${result.generation && result.generation.liteRtActive ? "yes" : "no"}.`;
+      await loadAdminGenerations();
+    } catch (error) {
+      $("generation-admin-message").textContent = `Cancellation failed: ${error.message}`;
+    }
+  }
+
+  async function cancelAdminGeneration(id) {
+    $("generation-admin-message").textContent = "";
+    try {
+      await jsonRequest(`/api/admin/generations/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" });
+      $("generation-admin-message").textContent = "Generation cancelled.";
+      await loadAdminGenerations();
+    } catch (error) {
+      $("generation-admin-message").textContent = `Cancellation failed: ${error.message}`;
+    }
   }
 
   function renderAdminUrls(status) {
@@ -1157,6 +1293,17 @@
     const value = Number(ms || 0);
     if (!value) return "Unknown";
     return new Date(value).toLocaleString();
+  }
+
+  function formatDuration(ms) {
+    const value = Number(ms || 0);
+    if (!value) return "0s";
+    const seconds = Math.floor(value / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
   }
 
   async function copyText(value) {

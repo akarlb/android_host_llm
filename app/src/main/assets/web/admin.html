@@ -42,6 +42,31 @@
           <dl id="system-status" class="status-grid"></dl>
         </section>
         <section class="admin-panel">
+          <div class="panel-heading">
+            <h2>Generations</h2>
+            <div class="button-row tight">
+              <button id="generations-refresh-button" type="button">Refresh</button>
+              <button id="generations-cancel-all-button" type="button">Cancel all active</button>
+            </div>
+          </div>
+          <dl id="generation-status" class="status-grid"></dl>
+          <p id="generation-admin-message" class="context-status" aria-live="polite"></p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Age</th>
+                  <th>Chat ID</th>
+                  <th>Error</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="admin-generations"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="admin-panel">
           <h2>URLs</h2>
           <div id="admin-urls" class="url-list"></div>
         </section>
