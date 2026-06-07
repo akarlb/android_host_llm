@@ -2049,15 +2049,16 @@ class LocalHttpServer(
                         val result = runBlocking {
                             liteRtLmManager.generateStreaming(
                                 prompt = prompt,
+                                onChunk = { chunk: String ->
+                                    if (chunk.isNotEmpty()) {
+                                        streamed.append(chunk)
+                                        generationJobs.appendPartial(generationId, chunk)
+                                        writeEvent(JSONObject().put("content", chunk).toString())
+                                    }
+                                },
                                 conversationModeOverride = conversationMode,
                                 responseModeOverride = responseMode,
-                            ) { chunk ->
-                                if (chunk.isNotEmpty()) {
-                                    streamed.append(chunk)
-                                    generationJobs.appendPartial(generationId, chunk)
-                                    writeEvent(JSONObject().put("content", chunk).toString())
-                                }
-                            }
+                            )
                         }
                         result.fold(
                             onSuccess = { raw ->
