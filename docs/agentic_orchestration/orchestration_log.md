@@ -761,3 +761,25 @@ Results:
 
 Next action:
 - Merge only into `codex/orchestration-phases-1-7`.
+
+## 2026-06-07T15:10:25+02:00
+
+Branch: codex/orchestration-phases-1-7
+
+Phase: Hotfix merge - generation active lock
+
+Action taken:
+- Merged `codex/hotfix-generation-active-lock` into `codex/orchestration-phases-1-7` with `--no-ff`.
+- Did not merge to `main`, `master`, `develop`, or any production/default branch.
+- Left Phase 7 deferred.
+
+Checks run:
+- git diff --check
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug --no-daemon
+
+Results:
+- Post-merge whitespace check passed.
+- Post-merge APK compile passed.
+
+Next action:
+- Live phone/model diagnostic verification can be run against a reachable device server when available.
