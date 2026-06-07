@@ -4,7 +4,7 @@ Current phase branch: codex/hotfix-generation-active-lock
 Last completed phase: Phase 6
 Next phase: Phase 7 deferred pending explicit authorization
 APK compile status: passed on orchestration branch with ANDROID_HOME=/tmp/android-sdk and GRADLE_CMD=/tmp/gradle-8.9/bin/gradle
-Spec/check status: Hotfix implemented; final static/compile/lint/check gates pending
+Spec/check status: Hotfix static checks, unit tests, lint, check, and APK compile passed on hotfix branch
 Blocked: no
 Blocker summary: none for hotfix; Phase 7 remains deferred pending explicit authorization
 Last updated: 2026-06-07T15:00:06+02:00

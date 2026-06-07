@@ -74,20 +74,22 @@ Responses include non-sensitive global summary fields: `jobStoreActive`, `liteRt
 Passed:
 
 ```sh
+bash -n test_mvp_full_stack.sh
+bash -n test_skills_tools_thinking.sh
+bash -n test_local_ops.sh
 bash -n diagnose_generation_active.sh
 node --check app/src/main/assets/web/app.js
 ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test --no-daemon
+git diff --check
+ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug --no-daemon
+ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test lint check --no-daemon
 ```
 
 Initial `./gradlew test --no-daemon` failed before compilation because `ANDROID_HOME` was not set. It passed after setting `ANDROID_HOME=/tmp/android-sdk` and `ANDROID_SDK_ROOT=/tmp/android-sdk`.
 
 ## Compile Result
 
-Pending final full gate:
-
-```sh
-ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug
-```
+APK compile passed with `ANDROID_HOME=/tmp/android-sdk`, `ANDROID_SDK_ROOT=/tmp/android-sdk`, and `GRADLE_CMD=/tmp/gradle-8.9/bin/gradle`.
 
 ## Skipped Live Tests
 
@@ -101,4 +103,4 @@ Live phone/model diagnostics were not run in this Codex shell because there is n
 
 ## Next Recommended Action
 
-Run the final static, compile, lint, and check gates, then merge this hotfix branch only into `codex/orchestration-phases-1-7`. Phase 7 remains deferred.
+Merge this hotfix branch only into `codex/orchestration-phases-1-7`. Phase 7 remains deferred.

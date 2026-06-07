@@ -740,16 +740,24 @@ Action taken:
 - Updated `diagnose_generation_active.sh` for normalized `BASE_URL` and global generation probes.
 - Added focused `GenerationJobStore` JVM tests.
 
-Checks run so far:
+Checks run:
+- git diff --check
+- bash -n test_mvp_full_stack.sh
+- bash -n test_skills_tools_thinking.sh
+- bash -n test_local_ops.sh
 - bash -n diagnose_generation_active.sh
 - node --check app/src/main/assets/web/app.js
 - ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test --no-daemon
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew clean assembleDebug --no-daemon
+- ANDROID_HOME=/tmp/android-sdk ANDROID_SDK_ROOT=/tmp/android-sdk GRADLE_CMD=/tmp/gradle-8.9/bin/gradle ./gradlew test lint check --no-daemon
 
 Results:
 - Script syntax passed.
 - Frontend JS syntax passed.
 - JVM tests passed after rerunning with `ANDROID_HOME` and `ANDROID_SDK_ROOT`.
+- APK compile passed.
+- Gradle `test`, `lint`, and `check` passed.
 - Live phone/model diagnostics not run in this shell.
 
 Next action:
-- Run final static, APK compile, lint, and check gates, then merge only into `codex/orchestration-phases-1-7`.
+- Merge only into `codex/orchestration-phases-1-7`.
