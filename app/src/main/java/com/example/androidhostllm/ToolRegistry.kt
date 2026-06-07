@@ -64,13 +64,8 @@ class ToolRegistry(
         val trimmed = text.trim()
         if (trimmed.isBlank()) return parseFailure("empty_tool_call", "Tool call is empty", repairable = true)
         if (trimmed.length > MAX_TOOL_CALL_CHARS) return parseFailure("tool_call_too_large", "Tool call payload is too large", repairable = false)
-        val json = candidateJsonObjects(trimmed).let { candidates ->
-            when (candidates.size) {
-                0 -> return parseFailure("tool_call_not_json", "No single JSON object found", repairable = looksLikeToolCall(trimmed))
-                1 -> candidates.single()
-                else -> return parseFailure("multiple_tool_calls", "Multiple JSON objects found", repairable = false)
-            }
-        }
+        val json = candidateJsonObjectForToolCall(trimmed)
+            ?: return parseFailure("tool_call_not_json", "No single JSON object found", repairable = looksLikeToolCall(trimmed))
         if (json.length() != 1 || !json.has("tool_call")) return parseFailure("invalid_tool_call_root", "Expected only a tool_call object", repairable = true)
         val call = json.optJSONObject("tool_call") ?: return parseFailure("invalid_tool_call_shape", "tool_call must be an object", repairable = true)
         val allowedCallFields = setOf("name", "arguments")
@@ -180,14 +175,40 @@ class ToolRegistry(
             return ToolCallParseResult(null, ToolCallStatus.PARSE_FAILED, code, message, repairable)
         }
 
-        private fun candidateJsonObjects(text: String): List<JSONObject> {
-            val exact = runCatching { JSONObject(text) }.getOrNull()
-            if (exact != null) return listOf(exact)
-            val fenced = Regex("(?s)```(?:json)?\\s*(\\{.*?})\\s*```").findAll(text).mapNotNull { match ->
-                runCatching { JSONObject(match.groupValues[1].trim()) }.getOrNull()
-            }.toList()
-            if (fenced.isNotEmpty()) return fenced
-            return extractTopLevelJsonObjectStrings(text).mapNotNull { candidate ->
+        internal fun candidateJsonObjectForToolCall(text: String): JSONObject? {
+            fencedBlocks(text)
+                .filter { it.info.lowercase(Locale.US) == "json" }
+                .firstNotNullOfOrNull { block -> firstJsonObjectIn(block.content) }
+                ?.let { return it }
+
+            fencedBlocks(text)
+                .firstNotNullOfOrNull { block -> firstJsonObjectIn(block.content) }
+                ?.let { return it }
+
+            return firstJsonObjectIn(text)
+        }
+
+        private data class FencedBlock(val info: String, val content: String)
+
+        private fun fencedBlocks(text: String): Sequence<FencedBlock> = sequence {
+            var searchFrom = 0
+            while (searchFrom < text.length) {
+                val fenceStart = text.indexOf("```", searchFrom)
+                if (fenceStart < 0) break
+                val contentStart = text.indexOf('\n', fenceStart + 3)
+                if (contentStart < 0) break
+                val fenceEnd = text.indexOf("```", contentStart + 1)
+                if (fenceEnd < 0) break
+
+                val info = text.substring(fenceStart + 3, contentStart).trim()
+                val content = text.substring(contentStart + 1, fenceEnd).trim()
+                yield(FencedBlock(info, content))
+                searchFrom = fenceEnd + 3
+            }
+        }
+
+        private fun firstJsonObjectIn(text: String): JSONObject? {
+            return extractTopLevelJsonObjectStrings(text).firstNotNullOfOrNull { candidate ->
                 runCatching { JSONObject(candidate) }.getOrNull()
             }
         }
